@@ -1,0 +1,320 @@
+---
+title: "Open Finance (Brazil) — Quantitative Analysis (Credit Focus)"
+subtitle: "BCB Open Data (SGS/BCData) + optional IF.data (institution-level) extension"
+author: "Pranav Mehta"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: readable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 9,
+  fig.height = 5
+)
+```
+
+```{r include=FALSE}
+required_pkgs <- c(
+  "tidyverse", "httr", "jsonlite", "lubridate",
+  "scales", "broom", "sandwich", "lmtest", "zoo"
+)
+
+to_install <- required_pkgs[!required_pkgs %in% installed.packages()[,"Package"]]
+if (length(to_install) > 0) install.packages(to_install)
+
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(lubridate)
+library(scales)
+library(broom)
+library(sandwich)
+library(lmtest)
+library(zoo)
+```
+
+# Objective (Credit Focus)
+
+This notebook quantifies and analyzes credit-market outcomes in Brazil as a proxy for the credit segment of the Open Finance ecosystem, using publicly available Central Bank of Brazil (BCB) SGS/BCData time series.
+
+Because Open Finance “credit outcomes” are not directly observed in public BCB data (e.g., we do not observe loan-level Open Finance originations), we use aggregate credit metrics (credit stocks and their growth rates) to characterize the broader credit cycle and provide a baseline to which Open Finance adoption proxies (e.g., consent counts or API activity) can later be added.
+
+# What is Selic?
+
+Selic is Brazil’s policy interest rate target. It is the primary instrument used by the Central Bank of Brazil to influence inflation and economic activity. In macro-finance terms:
+
+- When Selic rises, borrowing costs increase and credit growth often slows (typically with lags).
+- When Selic falls, credit conditions usually loosen and credit growth may accelerate.
+
+In this notebook, Selic is treated as a policy/control variable to help separate broad macro forces (e.g., GDP growth) from monetary conditions.
+
+# Data Sources and Series Codes
+
+We use the following BCB SGS series (monthly or monthly-aggregated):
+
+- credit_total_stock (20539): total credit outstanding (stock)
+- credit_pj_stock (20540): corporate credit outstanding (PJ)
+- credit_pf_free (20570): household credit outstanding (PF, free resources)
+- selic_target (4189): Selic policy rate
+- gdp_nominal_month (4380): monthly nominal GDP proxy
+
+```{r series-map}
+series_map <- c(
+  credit_total_stock = 20539,
+  credit_pj_stock    = 20540,
+  credit_pf_free     = 20570,
+  selic_target       = 4189,   # working Selic series
+  gdp_nominal_month  = 4380
+)
+
+series_map
+```
+
+# Download Helper (SGS/BCData API)
+
+
+BCB provides time series via the SGS/BCData API:
+
+> https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados?formato=json&dataInicial=dd/mm/yyyy&dataFinal=dd/mm/yyyy
+
+```{r sgs-function}
+get_sgs_series <- function(code,
+                           start = "01/01/2013",
+                           end   = format(Sys.Date(), "%d/%m/%Y")) {
+
+  base <- paste0("https://api.bcb.gov.br/dados/serie/bcdata.sgs.", code, "/dados")
+
+  resp <- httr::GET(
+    url = base,
+    query = list(
+      formato     = "json",
+      dataInicial = start,
+      dataFinal   = end
+    ),
+    httr::add_headers(`User-Agent` = "R (Open Finance Capstone)")
+  )
+
+  httr::stop_for_status(resp)
+
+  raw <- jsonlite::fromJSON(httr::content(resp, as = "text", encoding = "UTF-8"))
+
+  if (length(raw) == 0) {
+    stop(paste("Series", code, "returned 0 rows."))
+  }
+
+  tibble(
+    date  = lubridate::dmy(raw$data),
+    value = readr::parse_number(as.character(raw$valor))
+  ) %>%
+    arrange(date)
+}
+```
+
+# Download and Construct Monthly Panel
+
+```{r download}
+start_date <- "01/01/2013"
+end_date   <- format(Sys.Date(), "%d/%m/%Y")
+
+df_list <- purrr::imap(
+  series_map,
+  ~ get_sgs_series(.x, start = start_date, end = end_date) %>%
+      mutate(series = .y)
+)
+
+df_long <- bind_rows(df_list)
+
+df_long %>% count(series)
+```
+
+## Align to month-end and pivot wide
+
+Different SGS series sometimes have different within-month timestamps (e.g., some appear as month-start). To align consistently, we:
+
+- Convert each observation date to a month-end index
+- Take the last observation in that month for each series
+- Pivot into a single monthly dataset
+
+```{r monthly-panel}
+df_monthly <- df_long %>%
+  mutate(month = ceiling_date(date, "month") - days(1)) %>%
+  group_by(series, month) %>%
+  summarise(value = last(na.omit(value)), .groups="drop") %>%
+  pivot_wider(names_from = series, values_from = value) %>%
+  arrange(month)
+
+names(df_monthly)
+```
+
+# Feature Engineering
+
+Credit series here are stocks (levels). For interpretability in regressions, we compute:
+
+- logs of credit and GDP
+- year-over-year (YoY) growth in credit and GDP using log differences:
+
+\[
+g^{yoy}_t \approx 100 \times \left(\ln X_t - \ln X_{t-12}\right)
+\]
+
+
+```{r features}
+df_feat <- df_monthly %>%
+  mutate(
+    ln_credit_total = log(credit_total_stock),
+    ln_credit_pj    = log(credit_pj_stock),
+    ln_credit_pf    = log(credit_pf_free),
+    ln_gdp          = log(gdp_nominal_month),
+
+    g_yoy_total = 100 * (ln_credit_total - lag(ln_credit_total, 12)),
+    g_yoy_pj    = 100 * (ln_credit_pj - lag(ln_credit_pj, 12)),
+    g_yoy_pf    = 100 * (ln_credit_pf - lag(ln_credit_pf, 12)),
+    gdp_yoy     = 100 * (ln_gdp - lag(ln_gdp, 12))
+  )
+```
+
+# Descriptive Plots
+
+## Credit Stocks
+
+```{r plot-levels}
+df_feat %>%
+  select(month, credit_total_stock, credit_pj_stock, credit_pf_free) %>%
+  pivot_longer(-month, names_to="series", values_to="value") %>%
+  ggplot(aes(month, value)) +
+  geom_line() +
+  facet_wrap(~series, scales="free_y", ncol=1) +
+  scale_y_continuous(labels = comma) +
+  labs(title="Credit Stocks in Brazil",
+       x=NULL, y=NULL) +
+  theme_minimal()
+```
+
+## YoY Growth
+
+```{r plot-yoy}
+df_feat %>%
+  select(month, g_yoy_total, g_yoy_pj, g_yoy_pf) %>%
+  pivot_longer(-month, names_to="series", values_to="yoy") %>%
+  ggplot(aes(month, yoy)) +
+  geom_line() +
+  geom_hline(yintercept=0, linetype="dashed") +
+  facet_wrap(~series, ncol=1) +
+  labs(title="YoY Credit Growth",
+       x=NULL, y="Percent") +
+  theme_minimal()
+```
+# Regression Framework
+
+We estimate time-series OLS regressions where the dependent variable is **year-over-year (YoY) credit growth**, and regressors include:
+
+- Selic (policy rate)  
+- YoY nominal GDP growth (macro activity)  
+
+## Baseline Regression Equation
+
+For segment $s \in \{\text{total}, \text{PF}, \text{PJ}\}$:
+
+\[
+g^{yoy}_{credit,s,t}
+=
+\beta_0
++
+\beta_1 \, Selic_t
++
+\beta_2 \, g^{yoy}_{GDP,t}
++
+\varepsilon_t
+\]
+
+where:
+
+- $g^{yoy}_{credit,s,t}$ is YoY credit growth for segment $s$ at time $t$  
+- $Selic_t$ is the policy interest rate  
+- $g^{yoy}_{GDP,t}$ is YoY nominal GDP growth  
+- $\varepsilon_t$ is the error term  
+
+## Interpretation
+
+- $\beta_1$ captures the association between monetary conditions and credit growth.  
+- $\beta_2$ captures **procyclicality**: whether credit grows faster during stronger macroeconomic conditions.  
+
+## OLS with Newey–West SE
+
+Monthly time-series data commonly exhibit:
+
+- Autocorrelation (serial correlation in residuals)  
+- Heteroskedasticity (non-constant variance of errors)  
+
+To address this, we use **Newey–West (HAC)** standard errors with a 12-month lag.
+
+This approach:
+
+- Avoids overconfident inference due to serial correlation  
+- Retains a simple, interpretable regression structure  
+- Provides consistent standard errors under fairly general time-series conditions  
+
+# Modeling Dataset
+
+```{r model-data}
+df_model <- df_feat %>%
+  select(month,
+         g_yoy_total, g_yoy_pf, g_yoy_pj,
+         selic_target,
+         gdp_yoy) %>%
+  drop_na()
+
+summary(df_model)
+```
+
+# Results: Total Credit Model (HAC SE)
+
+## Total Credit Growth
+
+```{r reg-total}
+m_total <- lm(g_yoy_total ~ selic_target + gdp_yoy, data = df_model)
+
+nw_total <- NeweyWest(m_total, lag = 12, prewhite = FALSE)
+
+coeftest(m_total, vcov = nw_total)
+```
+## Interpretation (Total)
+
+In the current specification:
+
+- GDP YoY is positive and statistically significant (in your run: ~0.60, p < 0.01), suggesting credit growth is procyclical.
+- Selic is negative but statistically insignificant, meaning we do not detect a stable contemporaneous linear association between Selic and YoY credit growth in this model.
+
+This is not unexpected because:
+
+- monetary policy effects often operate with lags
+- Selic is endogenous (rises when the economy is strong), which can blur its relationship with credit
+- credit stocks are slow-moving compared to credit flows
+
+## Results by Segment: PF vs PJ (HAC SE)
+
+```{r reg-segments}
+m_pf <- lm(g_yoy_pf ~ selic_target + gdp_yoy, data = df_model)
+m_pj <- lm(g_yoy_pj ~ selic_target + gdp_yoy, data = df_model)
+
+nw_pf <- NeweyWest(m_pf, lag=12)
+nw_pj <- NeweyWest(m_pj, lag=12)
+
+list(
+  PF = coeftest(m_pf, vcov=nw_pf),
+  PJ = coeftest(m_pj, vcov=nw_pj)
+)
+```
+
+## Interpretation
+
+- PF (households): GDP effect tends to be positive and sometimes closer to conventional significance; Selic remains insignificant.
+- PJ (corporates): estimates are less precise (larger SE), likely reflecting more volatile corporate credit dynamics and the coarse nature of aggregate series.
