@@ -65,6 +65,7 @@ We use the following BCB SGS series (monthly or monthly-aggregated):
 - credit_pf_free (20570): household credit outstanding (PF, free resources)
 - selic_target (4189): Selic policy rate
 - gdp_nominal_month (4380): monthly nominal GDP proxy
+- **Open Finance adoption metrics** (`data/of_monthly.csv`): unique consents, API calls, participating institutions (synthetic/illustrative).
 
 ```{r series-map}
 series_map <- c(
@@ -179,6 +180,41 @@ df_feat <- df_monthly %>%
     g_yoy_pf    = 100 * (ln_credit_pf - lag(ln_credit_pf, 12)),
     gdp_yoy     = 100 * (ln_gdp - lag(ln_gdp, 12))
   )
+```
+
+# Open Finance Adoption Data
+
+Open Finance Brazil began its phased rollout in February 2021. We incorporate monthly adoption metrics (unique consents, API calls, participating institutions) from a curated CSV file. Since the BCB credit data starts in 2013 but Open Finance only begins in 2021, the merge produces `NA` values for pre-OF months.
+
+```{r load-of-data}
+df_of <- read_csv("data/of_monthly.csv") %>%
+  mutate(month = as.Date(month))
+
+# Log-transform consents (spans several orders of magnitude)
+df_of <- df_of %>%
+  mutate(ln_of_consents = log(of_consents))
+
+# Left join into df_feat — preserves all existing rows
+df_feat <- df_feat %>%
+  left_join(df_of, by = "month")
+
+# Verify: how many months have OF data?
+cat("Months with Open Finance data:",
+    sum(!is.na(df_feat$of_consents)), "of", nrow(df_feat), "\n")
+```
+
+## Open Finance Adoption Over Time
+
+```{r plot-of-adoption}
+df_feat %>%
+  filter(!is.na(of_consents)) %>%
+  ggplot(aes(month, of_consents / 1e6)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 1.2) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Open Finance Brazil: Unique Consents (Millions)",
+       x = NULL, y = "Consents (millions)") +
+  theme_minimal()
 ```
 
 # Descriptive Plots
@@ -318,3 +354,95 @@ list(
 
 - PF (households): GDP effect tends to be positive and sometimes closer to conventional significance; Selic remains insignificant.
 - PJ (corporates): estimates are less precise (larger SE), likely reflecting more volatile corporate credit dynamics and the coarse nature of aggregate series.
+
+# Extended Model: Open Finance Adoption
+
+## Motivation
+
+The baseline regressions above capture the macro-credit relationship using Selic and GDP growth over the full 2014--present sample. However, they omit the structural change introduced by Open Finance Brazil (launched February 2021).
+
+We now augment the model with **log unique consents** (`ln_of_consents`) as a proxy for Open Finance adoption intensity. This variable captures the ecosystem's growth from tens of thousands to tens of millions of monthly active consents.
+
+**Important**: because Open Finance data is only available from February 2021, the extended model is estimated on a substantially shorter sample (~48 months vs ~130+ months in the baseline). Coefficient comparisons should account for this difference in sample period and size.
+
+## Extended Regression Equation
+
+For segment $s \in \{\text{total}, \text{PF}, \text{PJ}\}$:
+
+\[
+g^{yoy}_{credit,s,t}
+=
+\beta_0
++
+\beta_1 \, Selic_t
++
+\beta_2 \, g^{yoy}_{GDP,t}
++
+\beta_3 \, \ln(\text{OF\_consents}_t)
++
+\varepsilon_t
+\]
+
+where $\ln(\text{OF\_consents}_t)$ is the natural log of cumulative unique Open Finance consents at time $t$.
+
+- $\beta_3 > 0$ would suggest that greater Open Finance adoption is associated with faster credit growth, controlling for macro conditions.
+- $\beta_3 < 0$ or $\beta_3 \approx 0$ would suggest no detectable positive association in aggregate data.
+
+## Extended Modeling Dataset
+
+```{r model-data-of}
+df_model_of <- df_feat %>%
+  select(month,
+         g_yoy_total, g_yoy_pf, g_yoy_pj,
+         selic_target,
+         gdp_yoy,
+         ln_of_consents) %>%
+  drop_na()
+
+cat("Extended model sample:", nrow(df_model_of), "months\n")
+cat("Sample range:", as.character(min(df_model_of$month)),
+    "to", as.character(max(df_model_of$month)), "\n")
+summary(df_model_of)
+```
+
+## Extended Results: Total Credit Growth
+
+```{r reg-total-of}
+m_total_of <- lm(g_yoy_total ~ selic_target + gdp_yoy + ln_of_consents,
+                 data = df_model_of)
+
+nw_total_of <- NeweyWest(m_total_of, lag = 12, prewhite = FALSE)
+
+coeftest(m_total_of, vcov = nw_total_of)
+```
+
+## Extended Results: PF vs PJ
+
+```{r reg-segments-of}
+m_pf_of <- lm(g_yoy_pf ~ selic_target + gdp_yoy + ln_of_consents,
+              data = df_model_of)
+m_pj_of <- lm(g_yoy_pj ~ selic_target + gdp_yoy + ln_of_consents,
+              data = df_model_of)
+
+nw_pf_of <- NeweyWest(m_pf_of, lag = 12, prewhite = FALSE)
+nw_pj_of <- NeweyWest(m_pj_of, lag = 12, prewhite = FALSE)
+
+list(
+  PF = coeftest(m_pf_of, vcov = nw_pf_of),
+  PJ = coeftest(m_pj_of, vcov = nw_pj_of)
+)
+```
+
+## Interpretation (Extended Model)
+
+Key considerations when interpreting these results:
+
+1. **Sample restriction**: The extended model uses only ~48 months of data (2021 onward) compared to 120+ months in the baseline. Smaller samples reduce statistical power and increase standard errors.
+
+2. **Collinearity with trend**: `ln_of_consents` is monotonically increasing over 2021--2025, which means it is highly correlated with any time trend. A significant coefficient may reflect a general post-pandemic credit trend rather than a causal Open Finance effect.
+
+3. **Causal interpretation**: This is an observational regression. A positive $\hat{\beta}_3$ does **not** imply Open Finance *caused* credit growth. It could reflect reverse causality (credit growth driving OF adoption), omitted variable bias (post-pandemic recovery driving both), or coincident timing of multiple structural reforms.
+
+4. **Magnitude**: Because we use log consents, $\hat{\beta}_3$ is interpreted as: a 1% increase in consents is associated with a $\hat{\beta}_3 / 100$ percentage-point change in YoY credit growth.
+
+5. **Comparison with baseline**: Compare the $\hat{\beta}_1$ and $\hat{\beta}_2$ estimates across baseline and extended models to assess coefficient stability when restricting to the shorter sample.
