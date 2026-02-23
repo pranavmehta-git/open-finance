@@ -1,6 +1,6 @@
 ---
-title: "Open Finance (Brazil) — Quantitative Analysis (Credit Focus)"
-subtitle: "BCB Open Data (SGS/BCData) + optional IF.data (institution-level) extension"
+title: "Open Finance (Brazil) — Quantitative Analysis (PIX & Adoption Focus)"
+subtitle: "Analyzing PIX Transaction Growth, Customer Adoption, and Macro Determinants"
 author: "Pranav Mehta"
 date: "`r format(Sys.Date(), '%B %d, %Y')`"
 output:
@@ -23,7 +23,7 @@ knitr::opts_chunk$set(
 
 ```{r include=FALSE}
 required_pkgs <- c(
-  "tidyverse", "httr", "jsonlite", "lubridate",
+  "tidyverse", "readxl", "lubridate",
   "scales", "broom", "sandwich", "lmtest", "zoo"
 )
 
@@ -31,8 +31,7 @@ to_install <- required_pkgs[!required_pkgs %in% installed.packages()[,"Package"]
 if (length(to_install) > 0) install.packages(to_install)
 
 library(tidyverse)
-library(httr)
-library(jsonlite)
+library(readxl)
 library(lubridate)
 library(scales)
 library(broom)
@@ -41,408 +40,473 @@ library(lmtest)
 library(zoo)
 ```
 
-# Objective (Credit Focus)
+# Objective
 
-This notebook quantifies and analyzes credit-market outcomes in Brazil as a proxy for the credit segment of the Open Finance ecosystem, using publicly available Central Bank of Brazil (BCB) SGS/BCData time series.
+This notebook analyzes the growth dynamics of Brazil's Open Finance ecosystem using two key proxies:
 
-Because Open Finance “credit outcomes” are not directly observed in public BCB data (e.g., we do not observe loan-level Open Finance originations), we use aggregate credit metrics (credit stocks and their growth rates) to characterize the broader credit cycle and provide a baseline to which Open Finance adoption proxies (e.g., consent counts or API activity) can later be added.
+1. **PIX transaction volumes** — Brazil's instant payment system, launched in November 2020, which has become the backbone of digital financial infrastructure.
+2. **Open Finance customer counts** — the number of customers with active data-sharing consents across participating institutions.
 
-# What is Selic?
+We examine how these adoption metrics relate to macroeconomic conditions, specifically:
 
-Selic is Brazil’s policy interest rate target. It is the primary instrument used by the Central Bank of Brazil to influence inflation and economic activity. In macro-finance terms:
+- **Selic** (the Central Bank of Brazil's policy interest rate)
+- **IBC-Br** (the Central Bank's monthly economic activity index, a GDP proxy)
 
-- When Selic rises, borrowing costs increase and credit growth often slows (typically with lags).
-- When Selic falls, credit conditions usually loosen and credit growth may accelerate.
+# Background
 
-In this notebook, Selic is treated as a policy/control variable to help separate broad macro forces (e.g., GDP growth) from monetary conditions.
+## PIX
 
-# Data Sources and Series Codes
+PIX is Brazil's instant payment system, launched by the Central Bank in November 2020. It enables real-time, 24/7 transfers between individuals, businesses, and government at zero cost to end users. PIX adoption has been explosive — from zero to billions of monthly transactions within a few years — making it one of the most successful instant payment deployments globally.
 
-We use the following BCB SGS series (monthly or monthly-aggregated):
+In the context of Open Finance, PIX serves as critical infrastructure: it enables payment initiation via third-party providers, a core pillar of the Open Finance framework.
 
-- credit_total_stock (20539): total credit outstanding (stock)
-- credit_pj_stock (20540): corporate credit outstanding (PJ)
-- credit_pf_free (20570): household credit outstanding (PF, free resources)
-- selic_target (4189): Selic policy rate
-- gdp_nominal_month (4380): monthly nominal GDP proxy
-- **Open Finance adoption metrics** (`data/of_monthly.csv`): unique consents, API calls, participating institutions (synthetic/illustrative).
+## Selic
 
-```{r series-map}
-series_map <- c(
-  credit_total_stock = 20539,
-  credit_pj_stock    = 20540,
-  credit_pf_free     = 20570,
-  selic_target       = 4189,   # working Selic series
-  gdp_nominal_month  = 4380
-)
+Selic is Brazil's policy interest rate target. It is the primary instrument used by the Central Bank of Brazil (BCB) to influence inflation and economic activity:
 
-series_map
+- When Selic rises, borrowing costs increase and economic activity often slows.
+- When Selic falls, financial conditions loosen and activity may accelerate.
+
+## IBC-Br
+
+The IBC-Br (Índice de Atividade Econômica do Banco Central) is a monthly economic activity index published by the BCB. It serves as a high-frequency proxy for GDP, capturing the trajectory of economic output between quarterly GDP releases.
+
+# Data Sources
+
+All data come from a single Excel workbook (`data/data_monthly.xlsx`) containing two sheets:
+
+**Sheet 1** — PIX, Customers, Selic, IBC-Br (January 2023 – January 2025)
+
+- `month`: calendar month
+- `pix`: PIX transaction count
+- `cust`: Open Finance customer count
+- `selic`: Selic rate (% p.a.)
+- `ibc_br`: IBC-Br index
+
+**Sheet 2** — PIX, Selic, IBC-Br (November 2020 – December 2024)
+
+- `month`: calendar month
+- `pix`: PIX transaction count
+- `selic`: Selic rate (% p.a.)
+- `ibc_br`: IBC-Br index
+
+Sheet 2 provides the longer time series needed for year-over-year growth calculations, while Sheet 1 adds customer adoption data for a shorter but richer panel.
+
+# Load and Process Data
+
+```{r load-data}
+# Read both sheets from the Excel workbook
+df_long <- read_excel("data/data_monthly.xlsx", sheet = 2) %>%
+  mutate(month = dmy(paste0("01/", month)),
+         month = ceiling_date(month, "month") - days(1))
+
+df_short <- read_excel("data/data_monthly.xlsx", sheet = 1) %>%
+  mutate(month = dmy(paste0("01/", month)),
+         month = ceiling_date(month, "month") - days(1))
+
+cat("Long series (Sheet 2):", nrow(df_long), "months,",
+    as.character(min(df_long$month)), "to", as.character(max(df_long$month)), "\n")
+cat("Short series (Sheet 1):", nrow(df_short), "months,",
+    as.character(min(df_short$month)), "to", as.character(max(df_short$month)), "\n")
 ```
 
-# Download Helper (SGS/BCData API)
+```{r merge-data}
+# Merge customer data from Sheet 1 into the longer series
+df_merged <- df_long %>%
+  left_join(df_short %>% select(month, cust), by = "month")
 
+cat("Merged dataset:", nrow(df_merged), "months\n")
+cat("Months with customer data:", sum(!is.na(df_merged$cust)), "\n")
 
-BCB provides time series via the SGS/BCData API:
-
-> https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados?formato=json&dataInicial=dd/mm/yyyy&dataFinal=dd/mm/yyyy
-
-```{r sgs-function}
-get_sgs_series <- function(code,
-                           start = "01/01/2013",
-                           end   = format(Sys.Date(), "%d/%m/%Y")) {
-
-  base <- paste0("https://api.bcb.gov.br/dados/serie/bcdata.sgs.", code, "/dados")
-
-  resp <- httr::GET(
-    url = base,
-    query = list(
-      formato     = "json",
-      dataInicial = start,
-      dataFinal   = end
-    ),
-    httr::add_headers(`User-Agent` = "R (Open Finance Capstone)")
-  )
-
-  httr::stop_for_status(resp)
-
-  raw <- jsonlite::fromJSON(httr::content(resp, as = "text", encoding = "UTF-8"))
-
-  if (length(raw) == 0) {
-    stop(paste("Series", code, "returned 0 rows."))
-  }
-
-  tibble(
-    date  = lubridate::dmy(raw$data),
-    value = readr::parse_number(as.character(raw$valor))
-  ) %>%
-    arrange(date)
-}
-```
-
-# Download and Construct Monthly Panel
-
-```{r download}
-start_date <- "01/01/2013"
-end_date   <- format(Sys.Date(), "%d/%m/%Y")
-
-df_list <- purrr::imap(
-  series_map,
-  ~ get_sgs_series(.x, start = start_date, end = end_date) %>%
-      mutate(series = .y)
-)
-
-df_long <- bind_rows(df_list)
-
-df_long %>% count(series)
-```
-
-## Align to month-end and pivot wide
-
-Different SGS series sometimes have different within-month timestamps (e.g., some appear as month-start). To align consistently, we:
-
-- Convert each observation date to a month-end index
-- Take the last observation in that month for each series
-- Pivot into a single monthly dataset
-
-```{r monthly-panel}
-df_monthly <- df_long %>%
-  mutate(month = ceiling_date(date, "month") - days(1)) %>%
-  group_by(series, month) %>%
-  summarise(value = last(na.omit(value)), .groups="drop") %>%
-  pivot_wider(names_from = series, values_from = value) %>%
-  arrange(month)
-
-names(df_monthly)
+summary(df_merged)
 ```
 
 # Feature Engineering
 
-Credit series here are stocks (levels). For interpretability in regressions, we compute:
+We compute log transformations and year-over-year (YoY) growth rates using 12-month log differences:
 
-- logs of credit and GDP
-- year-over-year (YoY) growth in credit and GDP using log differences:
-
-\[
+$$
 g^{yoy}_t \approx 100 \times \left(\ln X_t - \ln X_{t-12}\right)
-\]
+$$
 
+For PIX and IBC-Br, this captures the pace of expansion controlling for seasonality.
 
 ```{r features}
-df_feat <- df_monthly %>%
+df_feat <- df_merged %>%
   mutate(
-    ln_credit_total = log(credit_total_stock),
-    ln_credit_pj    = log(credit_pj_stock),
-    ln_credit_pf    = log(credit_pf_free),
-    ln_gdp          = log(gdp_nominal_month),
+    ln_pix    = log(pix),
+    ln_ibc_br = log(ibc_br),
 
-    g_yoy_total = 100 * (ln_credit_total - lag(ln_credit_total, 12)),
-    g_yoy_pj    = 100 * (ln_credit_pj - lag(ln_credit_pj, 12)),
-    g_yoy_pf    = 100 * (ln_credit_pf - lag(ln_credit_pf, 12)),
-    gdp_yoy     = 100 * (ln_gdp - lag(ln_gdp, 12))
+    # YoY growth rates (require 12 months of history)
+    g_yoy_pix    = 100 * (ln_pix - lag(ln_pix, 12)),
+    g_yoy_ibc_br = 100 * (ln_ibc_br - lag(ln_ibc_br, 12)),
+
+    # Month-over-month growth (for shorter-horizon analysis)
+    g_mom_pix    = 100 * (ln_pix - lag(ln_pix, 1)),
+    g_mom_ibc_br = 100 * (ln_ibc_br - lag(ln_ibc_br, 1))
   )
-```
 
-# Open Finance Adoption Data
-
-Open Finance Brazil began its phased rollout in February 2021. We incorporate monthly adoption metrics (unique consents, API calls, participating institutions) from a curated CSV file. Since the BCB credit data starts in 2013 but Open Finance only begins in 2021, the merge produces `NA` values for pre-OF months.
-
-```{r load-of-data}
-df_of <- read_csv("data/of_monthly.csv") %>%
-  mutate(month = as.Date(month))
-
-# Log-transform consents (spans several orders of magnitude)
-df_of <- df_of %>%
-  mutate(ln_of_consents = log(of_consents))
-
-# Left join into df_feat — preserves all existing rows
+# Add customer features where available
 df_feat <- df_feat %>%
-  left_join(df_of, by = "month")
+  mutate(
+    ln_cust      = ifelse(!is.na(cust), log(cust), NA_real_),
+    g_yoy_cust   = 100 * (ln_cust - lag(ln_cust, 12)),
+    g_mom_cust   = 100 * (ln_cust - lag(ln_cust, 1))
+  )
 
-# Verify: how many months have OF data?
-cat("Months with Open Finance data:",
-    sum(!is.na(df_feat$of_consents)), "of", nrow(df_feat), "\n")
+cat("Observations with YoY PIX growth:", sum(!is.na(df_feat$g_yoy_pix)), "\n")
+cat("Observations with YoY customer growth:", sum(!is.na(df_feat$g_yoy_cust)), "\n")
 ```
 
-## Open Finance Adoption Over Time
+# Descriptive Analysis
 
-```{r plot-of-adoption}
+## PIX Transaction Volumes
+
+```{r plot-pix-levels}
 df_feat %>%
-  filter(!is.na(of_consents)) %>%
-  ggplot(aes(month, of_consents / 1e6)) +
+  ggplot(aes(month, pix / 1e9)) +
   geom_line(color = "steelblue", linewidth = 1) +
   geom_point(color = "steelblue", size = 1.2) +
   scale_y_continuous(labels = comma) +
-  labs(title = "Open Finance Brazil: Unique Consents (Millions)",
-       x = NULL, y = "Consents (millions)") +
+  labs(title = "PIX Monthly Transaction Volume",
+       subtitle = "Billions of transactions",
+       x = NULL, y = "Transactions (billions)") +
   theme_minimal()
 ```
 
-# Descriptive Plots
+## PIX YoY Growth
 
-## Credit Stocks
-
-```{r plot-levels}
+```{r plot-pix-yoy}
 df_feat %>%
-  select(month, credit_total_stock, credit_pj_stock, credit_pf_free) %>%
-  pivot_longer(-month, names_to="series", values_to="value") %>%
-  ggplot(aes(month, value)) +
-  geom_line() +
-  facet_wrap(~series, scales="free_y", ncol=1) +
+  filter(!is.na(g_yoy_pix)) %>%
+  ggplot(aes(month, g_yoy_pix)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "PIX Year-over-Year Transaction Growth",
+       x = NULL, y = "YoY Growth (%)") +
+  theme_minimal()
+```
+
+## Open Finance Customer Counts
+
+```{r plot-cust}
+df_feat %>%
+  filter(!is.na(cust)) %>%
+  ggplot(aes(month, cust / 1e6)) +
+  geom_line(color = "darkgreen", linewidth = 1) +
+  geom_point(color = "darkgreen", size = 1.2) +
   scale_y_continuous(labels = comma) +
-  labs(title="Credit Stocks in Brazil",
-       x=NULL, y=NULL) +
+  labs(title = "Open Finance Customer Counts",
+       subtitle = "Millions of customers",
+       x = NULL, y = "Customers (millions)") +
   theme_minimal()
 ```
 
-## YoY Growth
+## Selic Rate
 
-```{r plot-yoy}
+```{r plot-selic}
 df_feat %>%
-  select(month, g_yoy_total, g_yoy_pj, g_yoy_pf) %>%
-  pivot_longer(-month, names_to="series", values_to="yoy") %>%
-  ggplot(aes(month, yoy)) +
-  geom_line() +
-  geom_hline(yintercept=0, linetype="dashed") +
-  facet_wrap(~series, ncol=1) +
-  labs(title="YoY Credit Growth",
-       x=NULL, y="Percent") +
+  ggplot(aes(month, selic)) +
+  geom_line(color = "firebrick", linewidth = 1) +
+  labs(title = "Selic Policy Rate",
+       x = NULL, y = "Selic (% p.a.)") +
   theme_minimal()
 ```
+
+## IBC-Br Economic Activity Index
+
+```{r plot-ibc}
+df_feat %>%
+  ggplot(aes(month, ibc_br)) +
+  geom_line(color = "darkorange", linewidth = 1) +
+  labs(title = "IBC-Br Economic Activity Index",
+       x = NULL, y = "IBC-Br") +
+  theme_minimal()
+```
+
+## Combined Dashboard
+
+```{r plot-dashboard, fig.height=10}
+p1 <- df_feat %>%
+  ggplot(aes(month, pix / 1e9)) +
+  geom_line(color = "steelblue", linewidth = 0.8) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "PIX Transactions (Bn)", x = NULL, y = NULL) +
+  theme_minimal()
+
+p2 <- df_feat %>%
+  filter(!is.na(cust)) %>%
+  ggplot(aes(month, cust / 1e6)) +
+  geom_line(color = "darkgreen", linewidth = 0.8) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "OF Customers (Mn)", x = NULL, y = NULL) +
+  theme_minimal()
+
+p3 <- df_feat %>%
+  ggplot(aes(month, selic)) +
+  geom_line(color = "firebrick", linewidth = 0.8) +
+  labs(title = "Selic (%)", x = NULL, y = NULL) +
+  theme_minimal()
+
+p4 <- df_feat %>%
+  ggplot(aes(month, ibc_br)) +
+  geom_line(color = "darkorange", linewidth = 0.8) +
+  labs(title = "IBC-Br", x = NULL, y = NULL) +
+  theme_minimal()
+
+gridExtra::grid.arrange(p1, p2, p3, p4, ncol = 1)
+```
+
+## Correlation Matrix
+
+```{r correlation}
+df_corr <- df_feat %>%
+  select(pix, cust, selic, ibc_br) %>%
+  drop_na()
+
+cor_mat <- cor(df_corr)
+round(cor_mat, 3)
+```
+
 # Regression Framework
 
-We estimate time-series OLS regressions where the dependent variable is **year-over-year (YoY) credit growth**, and regressors include:
+We estimate time-series OLS regressions where the dependent variable is **PIX YoY transaction growth**, and regressors include:
 
-- Selic (policy rate)  
-- YoY nominal GDP growth (macro activity)  
+- **Selic** (policy rate) — captures monetary conditions
+- **IBC-Br YoY growth** — captures real economic activity
 
 ## Baseline Regression Equation
 
-For segment $s \in \{\text{total}, \text{PF}, \text{PJ}\}$:
-
-\[
-g^{yoy}_{credit,s,t}
+$$
+g^{yoy}_{PIX,t}
 =
 \beta_0
 +
 \beta_1 \, Selic_t
 +
-\beta_2 \, g^{yoy}_{GDP,t}
+\beta_2 \, g^{yoy}_{IBC\text{-}Br,t}
 +
 \varepsilon_t
-\]
+$$
 
 where:
 
-- $g^{yoy}_{credit,s,t}$ is YoY credit growth for segment $s$ at time $t$  
-- $Selic_t$ is the policy interest rate  
-- $g^{yoy}_{GDP,t}$ is YoY nominal GDP growth  
-- $\varepsilon_t$ is the error term  
+- $g^{yoy}_{PIX,t}$ is the YoY growth rate of PIX transactions at time $t$
+- $Selic_t$ is the policy interest rate
+- $g^{yoy}_{IBC\text{-}Br,t}$ is the YoY growth rate of the IBC-Br index
+- $\varepsilon_t$ is the error term
 
 ## Interpretation
 
-- $\beta_1$ captures the association between monetary conditions and credit growth.  
-- $\beta_2$ captures **procyclicality**: whether credit grows faster during stronger macroeconomic conditions.  
+- $\beta_1$ captures the association between monetary conditions and PIX growth. A negative coefficient would suggest tighter monetary policy is associated with slower PIX adoption growth.
+- $\beta_2$ captures **procyclicality**: whether PIX transaction growth accelerates during stronger economic conditions.
 
-## OLS with Newey–West SE
+## Newey–West Standard Errors
 
-Monthly time-series data commonly exhibit:
+Monthly time-series data commonly exhibit autocorrelation and heteroskedasticity. We use **Newey–West (HAC)** standard errors to produce consistent inference under these conditions. Given our sample size, we use a lag truncation parameter proportional to the data frequency.
 
-- Autocorrelation (serial correlation in residuals)  
-- Heteroskedasticity (non-constant variance of errors)  
+# Baseline Model: PIX Growth ~ Selic + IBC-Br Growth
 
-To address this, we use **Newey–West (HAC)** standard errors with a 12-month lag.
-
-This approach:
-
-- Avoids overconfident inference due to serial correlation  
-- Retains a simple, interpretable regression structure  
-- Provides consistent standard errors under fairly general time-series conditions  
-
-# Modeling Dataset
-
-```{r model-data}
-df_model <- df_feat %>%
-  select(month,
-         g_yoy_total, g_yoy_pf, g_yoy_pj,
-         selic_target,
-         gdp_yoy) %>%
+```{r model-data-baseline}
+df_model_base <- df_feat %>%
+  select(month, g_yoy_pix, selic, g_yoy_ibc_br) %>%
   drop_na()
 
-summary(df_model)
+cat("Baseline sample:", nrow(df_model_base), "months\n")
+cat("Sample range:", as.character(min(df_model_base$month)),
+    "to", as.character(max(df_model_base$month)), "\n")
+summary(df_model_base)
 ```
 
-# Results: Total Credit Model (HAC SE)
+## Results: Baseline
 
-## Total Credit Growth
+```{r reg-baseline}
+m_base <- lm(g_yoy_pix ~ selic + g_yoy_ibc_br, data = df_model_base)
 
-```{r reg-total}
-m_total <- lm(g_yoy_total ~ selic_target + gdp_yoy, data = df_model)
+# Newey-West HAC standard errors
+nw_lag <- floor(0.75 * nrow(df_model_base)^(1/3))
+cat("Newey-West lag truncation:", nw_lag, "\n")
 
-nw_total <- NeweyWest(m_total, lag = 12, prewhite = FALSE)
+nw_base <- NeweyWest(m_base, lag = nw_lag, prewhite = FALSE)
 
-coeftest(m_total, vcov = nw_total)
-```
-## Interpretation (Total)
-
-In the current specification:
-
-- GDP YoY is positive and statistically significant (in your run: ~0.60, p < 0.01), suggesting credit growth is procyclical.
-- Selic is negative but statistically insignificant, meaning we do not detect a stable contemporaneous linear association between Selic and YoY credit growth in this model.
-
-This is not unexpected because:
-
-- monetary policy effects often operate with lags
-- Selic is endogenous (rises when the economy is strong), which can blur its relationship with credit
-- credit stocks are slow-moving compared to credit flows
-
-## Results by Segment: PF vs PJ (HAC SE)
-
-```{r reg-segments}
-m_pf <- lm(g_yoy_pf ~ selic_target + gdp_yoy, data = df_model)
-m_pj <- lm(g_yoy_pj ~ selic_target + gdp_yoy, data = df_model)
-
-nw_pf <- NeweyWest(m_pf, lag=12)
-nw_pj <- NeweyWest(m_pj, lag=12)
-
-list(
-  PF = coeftest(m_pf, vcov=nw_pf),
-  PJ = coeftest(m_pj, vcov=nw_pj)
-)
+coeftest(m_base, vcov = nw_base)
 ```
 
-## Interpretation
+```{r reg-baseline-summary}
+cat("\nR-squared:", round(summary(m_base)$r.squared, 4), "\n")
+cat("Adj. R-squared:", round(summary(m_base)$adj.r.squared, 4), "\n")
+```
 
-- PF (households): GDP effect tends to be positive and sometimes closer to conventional significance; Selic remains insignificant.
-- PJ (corporates): estimates are less precise (larger SE), likely reflecting more volatile corporate credit dynamics and the coarse nature of aggregate series.
+## Interpretation (Baseline)
 
-# Extended Model: Open Finance Adoption
+Key considerations:
+
+- **Selic**: A negative coefficient would indicate that higher interest rates are associated with slower PIX growth, consistent with tighter monetary conditions dampening digital payment adoption. However, PIX adoption may be driven primarily by structural and behavioral shifts rather than interest rate cycles.
+- **IBC-Br growth**: A positive coefficient would suggest PIX growth is procyclical — transaction volumes grow faster when the economy is expanding.
+- **R-squared**: Indicates how much of the variation in PIX growth is explained by macro variables alone. A low R-squared would suggest PIX growth is driven primarily by non-macro factors (adoption dynamics, network effects, regulatory mandates).
+
+# Extended Model: Adding Open Finance Customer Growth
 
 ## Motivation
 
-The baseline regressions above capture the macro-credit relationship using Selic and GDP growth over the full 2014--present sample. However, they omit the structural change introduced by Open Finance Brazil (launched February 2021).
+The baseline model captures macro determinants of PIX growth. We now add **Open Finance customer counts** (log-transformed) to test whether broader Open Finance adoption is associated with PIX transaction growth beyond what macro conditions explain.
 
-We now augment the model with **log unique consents** (`ln_of_consents`) as a proxy for Open Finance adoption intensity. This variable captures the ecosystem's growth from tens of thousands to tens of millions of monthly active consents.
-
-**Important**: because Open Finance data is only available from February 2021, the extended model is estimated on a substantially shorter sample (~48 months vs ~130+ months in the baseline). Coefficient comparisons should account for this difference in sample period and size.
+Customer data is available from January 2023, so this model uses a shorter sample.
 
 ## Extended Regression Equation
 
-For segment $s \in \{\text{total}, \text{PF}, \text{PJ}\}$:
-
-\[
-g^{yoy}_{credit,s,t}
+$$
+g^{yoy}_{PIX,t}
 =
 \beta_0
 +
 \beta_1 \, Selic_t
 +
-\beta_2 \, g^{yoy}_{GDP,t}
+\beta_2 \, g^{yoy}_{IBC\text{-}Br,t}
 +
-\beta_3 \, \ln(\text{OF\_consents}_t)
+\beta_3 \, \ln(\text{Customers}_t)
 +
 \varepsilon_t
-\]
+$$
 
-where $\ln(\text{OF\_consents}_t)$ is the natural log of cumulative unique Open Finance consents at time $t$.
+where $\ln(\text{Customers}_t)$ is the natural log of Open Finance customer counts at time $t$.
 
-- $\beta_3 > 0$ would suggest that greater Open Finance adoption is associated with faster credit growth, controlling for macro conditions.
-- $\beta_3 < 0$ or $\beta_3 \approx 0$ would suggest no detectable positive association in aggregate data.
+- $\beta_3 > 0$: greater Open Finance adoption is associated with faster PIX growth, controlling for macro conditions.
+- $\beta_3 \leq 0$: no detectable positive association.
 
 ## Extended Modeling Dataset
 
-```{r model-data-of}
-df_model_of <- df_feat %>%
-  select(month,
-         g_yoy_total, g_yoy_pf, g_yoy_pj,
-         selic_target,
-         gdp_yoy,
-         ln_of_consents) %>%
+```{r model-data-extended}
+df_model_ext <- df_feat %>%
+  select(month, g_yoy_pix, selic, g_yoy_ibc_br, ln_cust) %>%
   drop_na()
 
-cat("Extended model sample:", nrow(df_model_of), "months\n")
-cat("Sample range:", as.character(min(df_model_of$month)),
-    "to", as.character(max(df_model_of$month)), "\n")
-summary(df_model_of)
+cat("Extended model sample:", nrow(df_model_ext), "months\n")
+cat("Sample range:", as.character(min(df_model_ext$month)),
+    "to", as.character(max(df_model_ext$month)), "\n")
+summary(df_model_ext)
 ```
 
-## Extended Results: Total Credit Growth
+## Results: Extended Model
 
-```{r reg-total-of}
-m_total_of <- lm(g_yoy_total ~ selic_target + gdp_yoy + ln_of_consents,
-                 data = df_model_of)
+```{r reg-extended}
+m_ext <- lm(g_yoy_pix ~ selic + g_yoy_ibc_br + ln_cust, data = df_model_ext)
 
-nw_total_of <- NeweyWest(m_total_of, lag = 12, prewhite = FALSE)
+nw_lag_ext <- max(1, floor(0.75 * nrow(df_model_ext)^(1/3)))
+cat("Newey-West lag truncation:", nw_lag_ext, "\n")
 
-coeftest(m_total_of, vcov = nw_total_of)
+nw_ext <- NeweyWest(m_ext, lag = nw_lag_ext, prewhite = FALSE)
+
+coeftest(m_ext, vcov = nw_ext)
 ```
 
-## Extended Results: PF vs PJ
-
-```{r reg-segments-of}
-m_pf_of <- lm(g_yoy_pf ~ selic_target + gdp_yoy + ln_of_consents,
-              data = df_model_of)
-m_pj_of <- lm(g_yoy_pj ~ selic_target + gdp_yoy + ln_of_consents,
-              data = df_model_of)
-
-nw_pf_of <- NeweyWest(m_pf_of, lag = 12, prewhite = FALSE)
-nw_pj_of <- NeweyWest(m_pj_of, lag = 12, prewhite = FALSE)
-
-list(
-  PF = coeftest(m_pf_of, vcov = nw_pf_of),
-  PJ = coeftest(m_pj_of, vcov = nw_pj_of)
-)
+```{r reg-extended-summary}
+cat("\nR-squared:", round(summary(m_ext)$r.squared, 4), "\n")
+cat("Adj. R-squared:", round(summary(m_ext)$adj.r.squared, 4), "\n")
 ```
 
 ## Interpretation (Extended Model)
 
-Key considerations when interpreting these results:
+Key considerations:
 
-1. **Sample restriction**: The extended model uses only ~48 months of data (2021 onward) compared to 120+ months in the baseline. Smaller samples reduce statistical power and increase standard errors.
+1. **Sample restriction**: The extended model uses only the months with customer data (~12–13 months with YoY growth available), substantially fewer than the baseline. This reduces statistical power and increases standard errors.
 
-2. **Collinearity with trend**: `ln_of_consents` is monotonically increasing over 2021--2025, which means it is highly correlated with any time trend. A significant coefficient may reflect a general post-pandemic credit trend rather than a causal Open Finance effect.
+2. **Collinearity with trend**: `ln_cust` is likely monotonically increasing, which means it is correlated with any time trend. A significant coefficient may reflect a general trend rather than a causal relationship.
 
-3. **Causal interpretation**: This is an observational regression. A positive $\hat{\beta}_3$ does **not** imply Open Finance *caused* credit growth. It could reflect reverse causality (credit growth driving OF adoption), omitted variable bias (post-pandemic recovery driving both), or coincident timing of multiple structural reforms.
+3. **Causal interpretation**: This is an observational regression. A positive $\hat{\beta}_3$ does **not** imply that Open Finance adoption *caused* PIX growth. Plausible confounders include:
+   - Reverse causality (PIX growth driving OF adoption)
+   - Omitted variables (post-pandemic digitization driving both)
+   - Regulatory mandates affecting both simultaneously
 
-4. **Magnitude**: Because we use log consents, $\hat{\beta}_3$ is interpreted as: a 1% increase in consents is associated with a $\hat{\beta}_3 / 100$ percentage-point change in YoY credit growth.
+4. **Magnitude**: Because we use log customers, $\hat{\beta}_3$ is interpreted as: a 1% increase in customers is associated with a $\hat{\beta}_3 / 100$ percentage-point change in YoY PIX growth.
 
-5. **Comparison with baseline**: Compare the $\hat{\beta}_1$ and $\hat{\beta}_2$ estimates across baseline and extended models to assess coefficient stability when restricting to the shorter sample.
+# Alternative Specification: Month-over-Month Growth
+
+For robustness, we also estimate models using month-over-month (MoM) growth rates. MoM growth is noisier but uses all available observations without requiring 12 months of history.
+
+```{r model-mom}
+df_model_mom <- df_feat %>%
+  select(month, g_mom_pix, selic, g_mom_ibc_br) %>%
+  drop_na()
+
+cat("MoM baseline sample:", nrow(df_model_mom), "months\n")
+
+m_mom <- lm(g_mom_pix ~ selic + g_mom_ibc_br, data = df_model_mom)
+nw_mom <- NeweyWest(m_mom, lag = max(1, floor(0.75 * nrow(df_model_mom)^(1/3))),
+                    prewhite = FALSE)
+
+cat("\n--- MoM Baseline: PIX Growth ~ Selic + IBC-Br Growth ---\n")
+coeftest(m_mom, vcov = nw_mom)
+```
+
+```{r model-mom-extended}
+df_model_mom_ext <- df_feat %>%
+  select(month, g_mom_pix, selic, g_mom_ibc_br, ln_cust) %>%
+  drop_na()
+
+cat("MoM extended sample:", nrow(df_model_mom_ext), "months\n")
+
+m_mom_ext <- lm(g_mom_pix ~ selic + g_mom_ibc_br + ln_cust,
+                data = df_model_mom_ext)
+nw_mom_ext <- NeweyWest(m_mom_ext,
+                        lag = max(1, floor(0.75 * nrow(df_model_mom_ext)^(1/3))),
+                        prewhite = FALSE)
+
+cat("\n--- MoM Extended: PIX Growth ~ Selic + IBC-Br Growth + ln(Customers) ---\n")
+coeftest(m_mom_ext, vcov = nw_mom_ext)
+```
+
+# Summary of Results
+
+```{r summary-table}
+extract_results <- function(model, nw_vcov, label) {
+  ct <- coeftest(model, vcov = nw_vcov)
+  tibble(
+    Model = label,
+    Term = rownames(ct),
+    Estimate = ct[, "Estimate"],
+    `Std. Error (HAC)` = ct[, "Std. Error"],
+    `t value` = ct[, "t value"],
+    `p value` = ct[, "Pr(>|t|)"],
+    R2 = summary(model)$r.squared,
+    N = nobs(model)
+  )
+}
+
+results <- bind_rows(
+  extract_results(m_base, nw_base, "Baseline (YoY)"),
+  extract_results(m_ext, nw_ext, "Extended (YoY)"),
+  extract_results(m_mom, nw_mom, "Baseline (MoM)"),
+  extract_results(m_mom_ext, nw_mom_ext, "Extended (MoM)")
+)
+
+results %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+  knitr::kable(caption = "Regression Results Summary")
+```
+
+# Caveats and Limitations
+
+1. **Short sample**: PIX was launched in November 2020, giving us roughly 4 years of data. YoY growth calculations further reduce the usable sample to ~3 years. Customer data is available for only ~2 years.
+
+2. **Structural break in PIX**: PIX transactions grew from zero to billions in a few years. The early explosive growth phase (2020–2022) reflects adoption dynamics (S-curve) rather than macro sensitivity. The later phase (2023–2024) may better capture steady-state macro relationships.
+
+3. **Endogeneity**: All regressors are potentially endogenous. Selic responds to economic conditions, IBC-Br and PIX are jointly determined, and customer counts reflect the same digitization forces driving PIX. Instrumental variable or quasi-experimental approaches would be needed for causal identification.
+
+4. **Omitted variables**: Important drivers not included: population growth, smartphone penetration, regulatory mandates (BCB requirements for PIX adoption), competitive dynamics among banks and fintechs, and seasonal patterns.
+
+5. **Aggregation**: We use aggregate national data. Heterogeneity across regions, income groups, or institution types is not captured.
+
+# Key R Packages
+
+| Package | Purpose |
+|---------|---------|
+| `tidyverse` | Data manipulation and visualization |
+| `readxl` | Reading Excel files |
+| `lubridate` | Date handling |
+| `scales` | Axis formatting |
+| `sandwich` | HAC (Newey–West) variance estimators |
+| `lmtest` | Coefficient testing with robust SEs |
+| `broom` | Tidy model output |
+| `zoo` | Time-series utilities |
+| `gridExtra` | Arranging multiple plots |
