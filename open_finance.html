@@ -730,16 +730,7 @@ df_cart_mod &lt;- read_csv(&quot;data/carteira_pf_modalities.csv&quot;, show_col
          credit_pf_housing = 9,
          credit_pf_vehicles = 12)
 
-df_ativo_mod &lt;- read_csv(&quot;data/ativo_problematico_pf_modalities.csv&quot;, show_col_types = FALSE) %&gt;%
-  select(date = 1,
-         problem_pf_card = 6,
-         problem_pf_payroll = 7,
-         problem_pf_personal = 8,
-         problem_pf_housing = 9,
-         problem_pf_vehicles = 12)
-
 scr_pf_mod &lt;- df_cart_mod %&gt;%
-  left_join(df_ativo_mod, by = &quot;date&quot;) %&gt;%
   mutate(
     month = ymd(paste0(date, &quot;-01&quot;)),
     month = ceiling_date(month, &quot;month&quot;) - days(1)
@@ -784,67 +775,50 @@ cat(&quot;Combined dataset:&quot;, nrow(df_all), &quot;months\n&quot;)</code></p
 <div id="feature-engineering" class="section level1" number="7">
 <h1><span class="header-section-number">7</span> Feature
 Engineering</h1>
-<pre class="r"><code>df_feat &lt;- df_all %&gt;%
+<pre class="r"><code>safe_log &lt;- function(x) ifelse(!is.na(x) &amp; x &gt; 0, log(x), NA_real_)
+
+df_feat &lt;- df_all %&gt;%
   arrange(month) %&gt;%
   mutate(
-    # Log transformations
     ln_pix    = log(pix),
     ln_ibc_br = log(ibc_br),
-    ln_cust   = ifelse(!is.na(cust), log(cust), NA_real_),
+    ln_cust   = safe_log(cust),
+    ln_credit = safe_log(credit_portfolio),
 
-    # Credit log transformations
-    ln_credit = ifelse(!is.na(credit_portfolio) &amp; credit_portfolio &gt; 0,
-                       log(credit_portfolio), NA_real_),
+    # PF/PJ logs
+    ln_credit_pf = safe_log(credit_pf),
+    ln_credit_pj = safe_log(credit_pj),
 
-    # YoY growth rates (12-month log differences)
-    g_yoy_pix      = 100 * (ln_pix - lag(ln_pix, 12)),
-    g_yoy_ibc_br   = 100 * (ln_ibc_br - lag(ln_ibc_br, 12)),
-    g_yoy_credit   = 100 * (ln_credit - lag(ln_credit, 12)),
+    # PF modality logs
+    ln_pf_card     = safe_log(credit_pf_card),
+    ln_pf_payroll  = safe_log(credit_pf_payroll),
+    ln_pf_personal = safe_log(credit_pf_personal),
+    ln_pf_housing  = safe_log(credit_pf_housing),
 
-    # MoM growth rates
-    g_mom_pix      = 100 * (ln_pix - lag(ln_pix, 1)),
-    g_mom_ibc_br   = 100 * (ln_ibc_br - lag(ln_ibc_br, 1)),
-    g_mom_credit   = 100 * (ln_credit - lag(ln_credit, 1)),
-
-    # Default rate changes
-    d_default_rate     = default_rate - lag(default_rate, 1),
-    d_default_rate_yoy = default_rate - lag(default_rate, 12),
-
-    # Customer growth
-    g_yoy_cust = 100 * (ln_cust - lag(ln_cust, 12)),
-    g_mom_cust = 100 * (ln_cust - lag(ln_cust, 1))
-  )
-
-# PF/PJ credit features
-df_feat &lt;- df_feat %&gt;%
-  mutate(
-    ln_credit_pf = ifelse(!is.na(credit_pf) &amp; credit_pf &gt; 0, log(credit_pf), NA_real_),
-    ln_credit_pj = ifelse(!is.na(credit_pj) &amp; credit_pj &gt; 0, log(credit_pj), NA_real_),
-    g_yoy_credit_pf = 100 * (ln_credit_pf - lag(ln_credit_pf, 12)),
-    g_yoy_credit_pj = 100 * (ln_credit_pj - lag(ln_credit_pj, 12)),
-    d_default_pf_yoy = default_rate_pf - lag(default_rate_pf, 12),
-    d_default_pj_yoy = default_rate_pj - lag(default_rate_pj, 12)
-  )
-
-# PF modality credit features (key segments)
-df_feat &lt;- df_feat %&gt;%
-  mutate(
-    ln_pf_card     = ifelse(!is.na(credit_pf_card) &amp; credit_pf_card &gt; 0, log(credit_pf_card), NA_real_),
-    ln_pf_payroll  = ifelse(!is.na(credit_pf_payroll) &amp; credit_pf_payroll &gt; 0, log(credit_pf_payroll), NA_real_),
-    ln_pf_personal = ifelse(!is.na(credit_pf_personal) &amp; credit_pf_personal &gt; 0, log(credit_pf_personal), NA_real_),
-    ln_pf_housing  = ifelse(!is.na(credit_pf_housing) &amp; credit_pf_housing &gt; 0, log(credit_pf_housing), NA_real_),
+    # YoY growth rates (12-month log differences, %)
+    g_yoy_ibc_br      = 100 * (ln_ibc_br - lag(ln_ibc_br, 12)),
+    g_yoy_credit      = 100 * (ln_credit - lag(ln_credit, 12)),
+    g_yoy_credit_pf   = 100 * (ln_credit_pf - lag(ln_credit_pf, 12)),
+    g_yoy_credit_pj   = 100 * (ln_credit_pj - lag(ln_credit_pj, 12)),
     g_yoy_pf_card     = 100 * (ln_pf_card - lag(ln_pf_card, 12)),
     g_yoy_pf_payroll  = 100 * (ln_pf_payroll - lag(ln_pf_payroll, 12)),
     g_yoy_pf_personal = 100 * (ln_pf_personal - lag(ln_pf_personal, 12)),
-    g_yoy_pf_housing  = 100 * (ln_pf_housing - lag(ln_pf_housing, 12))
+    g_yoy_pf_housing  = 100 * (ln_pf_housing - lag(ln_pf_housing, 12)),
+
+    # MoM growth rates
+    g_mom_ibc_br = 100 * (ln_ibc_br - lag(ln_ibc_br, 1)),
+    g_mom_credit = 100 * (ln_credit - lag(ln_credit, 1)),
+
+    # Default rate YoY changes (pp)
+    d_default_rate_yoy = default_rate - lag(default_rate, 12),
+    d_default_pf_yoy   = default_rate_pf - lag(default_rate_pf, 12),
+    d_default_pj_yoy   = default_rate_pj - lag(default_rate_pj, 12)
   )
 
 cat(&quot;Observations with YoY credit growth:&quot;, sum(!is.na(df_feat$g_yoy_credit)), &quot;\n&quot;)</code></pre>
 <pre><code>## Observations with YoY credit growth: 44</code></pre>
 <pre class="r"><code>cat(&quot;Observations with YoY PF credit growth:&quot;, sum(!is.na(df_feat$g_yoy_credit_pf)), &quot;\n&quot;)</code></pre>
 <pre><code>## Observations with YoY PF credit growth: 44</code></pre>
-<pre class="r"><code>cat(&quot;Observations with YoY PJ credit growth:&quot;, sum(!is.na(df_feat$g_yoy_credit_pj)), &quot;\n&quot;)</code></pre>
-<pre><code>## Observations with YoY PJ credit growth: 44</code></pre>
 <pre class="r"><code>cat(&quot;Observations with customer data:&quot;, sum(!is.na(df_feat$ln_cust)), &quot;\n&quot;)</code></pre>
 <pre><code>## Observations with customer data: 36</code></pre>
 </div>
@@ -1028,26 +1002,9 @@ Matrix</h2>
   select(credit_portfolio, default_rate, pix, cust, selic, ibc_br) %&gt;%
   drop_na()
 
-if (nrow(cor_vars) &gt;= 3) {
-  cor_mat &lt;- cor(cor_vars)
-  cat(&quot;Correlation matrix (months with all variables):\n&quot;)
-  cat(&quot;N =&quot;, nrow(cor_vars), &quot;\n\n&quot;)
-  round(cor_mat, 3)
-} else {
-  cat(&quot;Insufficient overlapping observations for full correlation matrix.\n&quot;)
-
-  # Compute pairwise correlations for available pairs
-  cor_pairs &lt;- df_feat %&gt;%
-    select(credit_portfolio, default_rate, pix, selic, ibc_br) %&gt;%
-    drop_na()
-
-  if (nrow(cor_pairs) &gt;= 3) {
-    cat(&quot;Pairwise correlations (credit + macro, N =&quot;, nrow(cor_pairs), &quot;):\n\n&quot;)
-    round(cor(cor_pairs), 3)
-  }
-}</code></pre>
-<pre><code>## Correlation matrix (months with all variables):
-## N = 30</code></pre>
+cat(&quot;Correlation matrix (months with all variables, N =&quot;, nrow(cor_vars), &quot;):\n\n&quot;)</code></pre>
+<pre><code>## Correlation matrix (months with all variables, N = 30 ):</code></pre>
+<pre class="r"><code>round(cor(cor_vars), 3)</code></pre>
 <pre><code>##                  credit_portfolio default_rate    pix  cust  selic ibc_br
 ## credit_portfolio            1.000        0.233  0.966 0.959 -0.099  0.560
 ## default_rate                0.233        1.000  0.136 0.474  0.751  0.225
@@ -1123,28 +1080,23 @@ Growth ~ Selic + IBC-Br Growth</h2>
   select(month, g_yoy_credit, selic, g_yoy_ibc_br) %&gt;%
   drop_na()
 
-cat(&quot;Credit baseline sample:&quot;, nrow(df_m_cred), &quot;months\n&quot;)</code></pre>
-<pre><code>## Credit baseline sample: 44 months</code></pre>
-<pre class="r"><code>if (nrow(df_m_cred) &gt; 0) {
-  cat(&quot;Range:&quot;, as.character(min(df_m_cred$month)),
-      &quot;to&quot;, as.character(max(df_m_cred$month)), &quot;\n&quot;)
-}</code></pre>
-<pre><code>## Range: 2021-11-30 to 2025-06-30</code></pre>
-<pre class="r"><code>if (nrow(df_m_cred) &gt;= 5) {
-  m_cred_base &lt;- lm(g_yoy_credit ~ selic + g_yoy_ibc_br, data = df_m_cred)
-  nw_lag_cb &lt;- max(1, floor(0.75 * nrow(df_m_cred)^(1/3)))
-  nw_cred_base &lt;- NeweyWest(m_cred_base, lag = nw_lag_cb, prewhite = FALSE)
+nw_lag &lt;- function(n) max(1, floor(0.75 * n^(1/3)))
 
-  cat(&quot;\n--- Credit YoY Growth ~ Selic + IBC-Br Growth ---\n&quot;)
-  coeftest(m_cred_base, vcov = nw_cred_base)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_cred_base)$r.squared, 4), &quot;\n&quot;)
-} else {
-  cat(&quot;Insufficient observations for credit baseline model.\n&quot;)
-}</code></pre>
+m_cred_base &lt;- lm(g_yoy_credit ~ selic + g_yoy_ibc_br, data = df_m_cred)
+nw_cred_base &lt;- NeweyWest(m_cred_base, lag = nw_lag(nrow(df_m_cred)), prewhite = FALSE)
+
+cat(&quot;Credit baseline: N =&quot;, nrow(df_m_cred), &quot;, R² =&quot;, round(summary(m_cred_base)$r.squared, 4), &quot;\n&quot;)</code></pre>
+<pre><code>## Credit baseline: N = 44 , R&lt;U+00B2&gt; = 0.0048</code></pre>
+<pre class="r"><code>coeftest(m_cred_base, vcov = nw_cred_base)</code></pre>
 <pre><code>## 
-## --- Credit YoY Growth ~ Selic + IBC-Br Growth ---
+## t test of coefficients:
 ## 
-## R-squared: 0.0048</code></pre>
+##               Estimate Std. Error t value Pr(&gt;|t|)  
+## (Intercept)  12.058792   5.083588  2.3721  0.02246 *
+## selic        -0.062706   0.376731 -0.1664  0.86862  
+## g_yoy_ibc_br  0.105865   0.297546  0.3558  0.72382  
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
 </div>
 <div id="extended-credit-growth-selic-ibc-br-lncustomers" class="section level2" number="10.2">
 <h2><span class="header-section-number">10.2</span> Extended: Credit
@@ -1153,68 +1105,67 @@ Growth ~ Selic + IBC-Br + ln(Customers)</h2>
   select(month, g_yoy_credit, selic, g_yoy_ibc_br, ln_cust) %&gt;%
   drop_na()
 
-cat(&quot;Credit extended sample:&quot;, nrow(df_m_cred_ext), &quot;months\n&quot;)</code></pre>
-<pre><code>## Credit extended sample: 30 months</code></pre>
-<pre class="r"><code>if (nrow(df_m_cred_ext) &gt;= 5) {
-  m_cred_ext &lt;- lm(g_yoy_credit ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_cred_ext)
-  nw_lag_ce &lt;- max(1, floor(0.75 * nrow(df_m_cred_ext)^(1/3)))
-  nw_cred_ext &lt;- NeweyWest(m_cred_ext, lag = nw_lag_ce, prewhite = FALSE)
+m_cred_ext &lt;- lm(g_yoy_credit ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_cred_ext)
+nw_cred_ext &lt;- NeweyWest(m_cred_ext, lag = nw_lag(nrow(df_m_cred_ext)), prewhite = FALSE)
 
-  cat(&quot;\n--- Credit YoY Growth ~ Selic + IBC-Br Growth + ln(Customers) ---\n&quot;)
-  coeftest(m_cred_ext, vcov = nw_cred_ext)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_cred_ext)$r.squared, 4), &quot;\n&quot;)
-} else {
-  cat(&quot;Insufficient observations for credit extended model.\n&quot;)
-}</code></pre>
+cat(&quot;Credit + OF: N =&quot;, nrow(df_m_cred_ext), &quot;, R² =&quot;, round(summary(m_cred_ext)$r.squared, 4), &quot;\n&quot;)</code></pre>
+<pre><code>## Credit + OF: N = 30 , R&lt;U+00B2&gt; = 0.4298</code></pre>
+<pre class="r"><code>coeftest(m_cred_ext, vcov = nw_cred_ext)</code></pre>
 <pre><code>## 
-## --- Credit YoY Growth ~ Selic + IBC-Br Growth + ln(Customers) ---
+## t test of coefficients:
 ## 
-## R-squared: 0.4298</code></pre>
+##              Estimate Std. Error t value  Pr(&gt;|t|)    
+## (Intercept)  -0.77897   14.38713 -0.0541 0.9572345    
+## selic         0.52907    0.13887  3.8099 0.0007661 ***
+## g_yoy_ibc_br  0.56508    0.16133  3.5025 0.0016854 ** 
+## ln_cust       0.14140    0.89272  0.1584 0.8753744    
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
 </div>
 <div id="credit-growth-by-client-type" class="section level2" number="10.3">
 <h2><span class="header-section-number">10.3</span> Credit Growth by
 Client Type</h2>
 <pre class="r"><code># PF (Individuals)
 df_m_pf &lt;- df_feat %&gt;%
-  select(month, g_yoy_credit_pf, selic, g_yoy_ibc_br, ln_cust) %&gt;%
-  drop_na()
+  select(month, g_yoy_credit_pf, selic, g_yoy_ibc_br, ln_cust) %&gt;% drop_na()
 
-cat(&quot;PF credit extended sample:&quot;, nrow(df_m_pf), &quot;months\n&quot;)</code></pre>
-<pre><code>## PF credit extended sample: 30 months</code></pre>
-<pre class="r"><code>if (nrow(df_m_pf) &gt;= 5) {
-  m_pf &lt;- lm(g_yoy_credit_pf ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pf)
-  nw_pf &lt;- NeweyWest(m_pf, lag = max(1, floor(0.75 * nrow(df_m_pf)^(1/3))),
-                     prewhite = FALSE)
+m_pf &lt;- lm(g_yoy_credit_pf ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pf)
+nw_pf &lt;- NeweyWest(m_pf, lag = nw_lag(nrow(df_m_pf)), prewhite = FALSE)
 
-  cat(&quot;\n--- PF Credit YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n&quot;)
-  coeftest(m_pf, vcov = nw_pf)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_pf)$r.squared, 4), &quot;\n&quot;)
-}</code></pre>
+cat(&quot;Credit PF + OF: N =&quot;, nrow(df_m_pf), &quot;, R² =&quot;, round(summary(m_pf)$r.squared, 4), &quot;\n&quot;)</code></pre>
+<pre><code>## Credit PF + OF: N = 30 , R&lt;U+00B2&gt; = 0.6896</code></pre>
+<pre class="r"><code>coeftest(m_pf, vcov = nw_pf)</code></pre>
 <pre><code>## 
-## --- PF Credit YoY Growth ~ Selic + IBC-Br + ln(Customers) ---
+## t test of coefficients:
 ## 
-## R-squared: 0.6896</code></pre>
+##              Estimate Std. Error t value  Pr(&gt;|t|)    
+## (Intercept)  51.87395   10.76072  4.8207 5.395e-05 ***
+## selic         0.70788    0.11826  5.9861 2.552e-06 ***
+## g_yoy_ibc_br  0.50882    0.12195  4.1722 0.0002980 ***
+## ln_cust      -2.91735    0.66704 -4.3736 0.0001755 ***
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
 <pre class="r"><code># PJ (Firms)
 df_m_pj &lt;- df_feat %&gt;%
-  select(month, g_yoy_credit_pj, selic, g_yoy_ibc_br, ln_cust) %&gt;%
-  drop_na()
+  select(month, g_yoy_credit_pj, selic, g_yoy_ibc_br, ln_cust) %&gt;% drop_na()
 
-cat(&quot;\nPJ credit extended sample:&quot;, nrow(df_m_pj), &quot;months\n&quot;)</code></pre>
-<pre><code>## 
-## PJ credit extended sample: 30 months</code></pre>
-<pre class="r"><code>if (nrow(df_m_pj) &gt;= 5) {
-  m_pj &lt;- lm(g_yoy_credit_pj ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pj)
-  nw_pj &lt;- NeweyWest(m_pj, lag = max(1, floor(0.75 * nrow(df_m_pj)^(1/3))),
-                     prewhite = FALSE)
+m_pj &lt;- lm(g_yoy_credit_pj ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pj)
+nw_pj &lt;- NeweyWest(m_pj, lag = nw_lag(nrow(df_m_pj)), prewhite = FALSE)
 
-  cat(&quot;\n--- PJ Credit YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n&quot;)
-  coeftest(m_pj, vcov = nw_pj)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_pj)$r.squared, 4), &quot;\n&quot;)
-}</code></pre>
+cat(&quot;\nCredit PJ + OF: N =&quot;, nrow(df_m_pj), &quot;, R² =&quot;, round(summary(m_pj)$r.squared, 4), &quot;\n&quot;)</code></pre>
 <pre><code>## 
-## --- PJ Credit YoY Growth ~ Selic + IBC-Br + ln(Customers) ---
+## Credit PJ + OF: N = 30 , R&lt;U+00B2&gt; = 0.5973</code></pre>
+<pre class="r"><code>coeftest(m_pj, vcov = nw_pj)</code></pre>
+<pre><code>## 
+## t test of coefficients:
 ## 
-## R-squared: 0.5973</code></pre>
+##               Estimate Std. Error t value  Pr(&gt;|t|)    
+## (Intercept)  -80.99542   20.87185 -3.8806 0.0006378 ***
+## selic          0.29295    0.18815  1.5571 0.1315455    
+## g_yoy_ibc_br   0.65950    0.22920  2.8775 0.0079076 ** 
+## ln_cust        4.76567    1.29244  3.6874 0.0010508 ** 
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
 </div>
 <div id="pf-credit-growth-by-modality" class="section level2" number="10.4">
 <h2><span class="header-section-number">10.4</span> PF Credit Growth by
@@ -1223,58 +1174,64 @@ Modality</h2>
 df_m_card &lt;- df_feat %&gt;%
   select(month, g_yoy_pf_card, selic, g_yoy_ibc_br, ln_cust) %&gt;% drop_na()
 
-cat(&quot;PF Credit Card sample:&quot;, nrow(df_m_card), &quot;months\n&quot;)</code></pre>
-<pre><code>## PF Credit Card sample: 30 months</code></pre>
-<pre class="r"><code>if (nrow(df_m_card) &gt;= 5) {
-  m_card &lt;- lm(g_yoy_pf_card ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_card)
-  nw_card &lt;- NeweyWest(m_card, lag = max(1, floor(0.75 * nrow(df_m_card)^(1/3))),
-                       prewhite = FALSE)
-  cat(&quot;\n--- PF Credit Card YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n&quot;)
-  coeftest(m_card, vcov = nw_card)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_card)$r.squared, 4), &quot;\n&quot;)
-}</code></pre>
+m_card &lt;- lm(g_yoy_pf_card ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_card)
+nw_card &lt;- NeweyWest(m_card, lag = nw_lag(nrow(df_m_card)), prewhite = FALSE)
+
+cat(&quot;PF Card + OF: N =&quot;, nrow(df_m_card), &quot;, R² =&quot;, round(summary(m_card)$r.squared, 4), &quot;\n&quot;)</code></pre>
+<pre><code>## PF Card + OF: N = 30 , R&lt;U+00B2&gt; = 0.7068</code></pre>
+<pre class="r"><code>coeftest(m_card, vcov = nw_card)</code></pre>
 <pre><code>## 
-## --- PF Credit Card YoY Growth ~ Selic + IBC-Br + ln(Customers) ---
+## t test of coefficients:
 ## 
-## R-squared: 0.7068</code></pre>
-<pre class="r"><code># Personal loans (sem consignação — most likely to be affected by Open Finance)
+##              Estimate Std. Error t value  Pr(&gt;|t|)    
+## (Intercept)  52.91159   28.08692  1.8839 0.0708149 .  
+## selic         1.78774    0.23004  7.7714 3.033e-08 ***
+## g_yoy_ibc_br  0.90655    0.22788  3.9781 0.0004949 ***
+## ln_cust      -3.80533    1.75256 -2.1713 0.0392205 *  
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
+<pre class="r"><code># Personal loans (sem consignação — highest information friction)
 df_m_pers &lt;- df_feat %&gt;%
   select(month, g_yoy_pf_personal, selic, g_yoy_ibc_br, ln_cust) %&gt;% drop_na()
 
-cat(&quot;\nPF Personal Loans sample:&quot;, nrow(df_m_pers), &quot;months\n&quot;)</code></pre>
+m_pers &lt;- lm(g_yoy_pf_personal ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pers)
+nw_pers &lt;- NeweyWest(m_pers, lag = nw_lag(nrow(df_m_pers)), prewhite = FALSE)
+
+cat(&quot;\nPF Personal + OF: N =&quot;, nrow(df_m_pers), &quot;, R² =&quot;, round(summary(m_pers)$r.squared, 4), &quot;\n&quot;)</code></pre>
 <pre><code>## 
-## PF Personal Loans sample: 30 months</code></pre>
-<pre class="r"><code>if (nrow(df_m_pers) &gt;= 5) {
-  m_pers &lt;- lm(g_yoy_pf_personal ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pers)
-  nw_pers &lt;- NeweyWest(m_pers, lag = max(1, floor(0.75 * nrow(df_m_pers)^(1/3))),
-                       prewhite = FALSE)
-  cat(&quot;\n--- PF Personal Loans YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n&quot;)
-  coeftest(m_pers, vcov = nw_pers)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_pers)$r.squared, 4), &quot;\n&quot;)
-}</code></pre>
+## PF Personal + OF: N = 30 , R&lt;U+00B2&gt; = 0.5584</code></pre>
+<pre class="r"><code>coeftest(m_pers, vcov = nw_pers)</code></pre>
 <pre><code>## 
-## --- PF Personal Loans YoY Growth ~ Selic + IBC-Br + ln(Customers) ---
+## t test of coefficients:
 ## 
-## R-squared: 0.5584</code></pre>
+##                Estimate Std. Error t value Pr(&gt;|t|)   
+## (Intercept)  -126.66162   37.08721 -3.4152 0.002102 **
+## selic           0.32925    0.32386  1.0167 0.318684   
+## g_yoy_ibc_br    1.10914    0.40951  2.7085 0.011795 * 
+## ln_cust         7.64089    2.30044  3.3215 0.002661 **
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
 <pre class="r"><code># Housing
 df_m_house &lt;- df_feat %&gt;%
   select(month, g_yoy_pf_housing, selic, g_yoy_ibc_br, ln_cust) %&gt;% drop_na()
 
-cat(&quot;\nPF Housing sample:&quot;, nrow(df_m_house), &quot;months\n&quot;)</code></pre>
+m_house &lt;- lm(g_yoy_pf_housing ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_house)
+nw_house &lt;- NeweyWest(m_house, lag = nw_lag(nrow(df_m_house)), prewhite = FALSE)
+
+cat(&quot;\nPF Housing + OF: N =&quot;, nrow(df_m_house), &quot;, R² =&quot;, round(summary(m_house)$r.squared, 4), &quot;\n&quot;)</code></pre>
 <pre><code>## 
-## PF Housing sample: 30 months</code></pre>
-<pre class="r"><code>if (nrow(df_m_house) &gt;= 5) {
-  m_house &lt;- lm(g_yoy_pf_housing ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_house)
-  nw_house &lt;- NeweyWest(m_house, lag = max(1, floor(0.75 * nrow(df_m_house)^(1/3))),
-                        prewhite = FALSE)
-  cat(&quot;\n--- PF Housing YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n&quot;)
-  coeftest(m_house, vcov = nw_house)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_house)$r.squared, 4), &quot;\n&quot;)
-}</code></pre>
+## PF Housing + OF: N = 30 , R&lt;U+00B2&gt; = 0.7657</code></pre>
+<pre class="r"><code>coeftest(m_house, vcov = nw_house)</code></pre>
 <pre><code>## 
-## --- PF Housing YoY Growth ~ Selic + IBC-Br + ln(Customers) ---
+## t test of coefficients:
 ## 
-## R-squared: 0.7657</code></pre>
+##               Estimate Std. Error t value  Pr(&gt;|t|)    
+## (Intercept)  17.886340   3.066577  5.8327 3.795e-06 ***
+## selic         0.371029   0.048753  7.6104 4.453e-08 ***
+## g_yoy_ibc_br  0.151735   0.020121  7.5411 5.258e-08 ***
+## ln_cust      -0.657471   0.176634 -3.7222 0.0009606 ***
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
 </div>
 </div>
 <div id="part-b-default-rate-models-1" class="section level1" number="11">
@@ -1287,23 +1244,21 @@ Rate Change ~ Selic + IBC-Br Growth</h2>
   select(month, d_default_rate_yoy, selic, g_yoy_ibc_br) %&gt;%
   drop_na()
 
-cat(&quot;Default rate baseline sample:&quot;, nrow(df_m_def), &quot;months\n&quot;)</code></pre>
-<pre><code>## Default rate baseline sample: 44 months</code></pre>
-<pre class="r"><code>if (nrow(df_m_def) &gt;= 5) {
-  m_def_base &lt;- lm(d_default_rate_yoy ~ selic + g_yoy_ibc_br, data = df_m_def)
-  nw_lag_db &lt;- max(1, floor(0.75 * nrow(df_m_def)^(1/3)))
-  nw_def_base &lt;- NeweyWest(m_def_base, lag = nw_lag_db, prewhite = FALSE)
+m_def_base &lt;- lm(d_default_rate_yoy ~ selic + g_yoy_ibc_br, data = df_m_def)
+nw_def_base &lt;- NeweyWest(m_def_base, lag = nw_lag(nrow(df_m_def)), prewhite = FALSE)
 
-  cat(&quot;\n--- YoY Change in Default Rate ~ Selic + IBC-Br Growth ---\n&quot;)
-  coeftest(m_def_base, vcov = nw_def_base)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_def_base)$r.squared, 4), &quot;\n&quot;)
-} else {
-  cat(&quot;Insufficient observations for default rate baseline model.\n&quot;)
-}</code></pre>
+cat(&quot;Default baseline: N =&quot;, nrow(df_m_def), &quot;, R² =&quot;, round(summary(m_def_base)$r.squared, 4), &quot;\n&quot;)</code></pre>
+<pre><code>## Default baseline: N = 44 , R&lt;U+00B2&gt; = 0.6208</code></pre>
+<pre class="r"><code>coeftest(m_def_base, vcov = nw_def_base)</code></pre>
 <pre><code>## 
-## --- YoY Change in Default Rate ~ Selic + IBC-Br Growth ---
+## t test of coefficients:
 ## 
-## R-squared: 0.6208</code></pre>
+##               Estimate Std. Error t value  Pr(&gt;|t|)    
+## (Intercept)  -1.508946   0.547212 -2.7575 0.0086579 ** 
+## selic         0.169803   0.039467  4.3024 0.0001021 ***
+## g_yoy_ibc_br -0.076166   0.025699 -2.9638 0.0050427 ** 
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
 </div>
 <div id="extended-default-rate-change-selic-ibc-br-lncustomers" class="section level2" number="11.2">
 <h2><span class="header-section-number">11.2</span> Extended: Default
@@ -1312,73 +1267,67 @@ Rate Change ~ Selic + IBC-Br + ln(Customers)</h2>
   select(month, d_default_rate_yoy, selic, g_yoy_ibc_br, ln_cust) %&gt;%
   drop_na()
 
-cat(&quot;Default rate extended sample:&quot;, nrow(df_m_def_ext), &quot;months\n&quot;)</code></pre>
-<pre><code>## Default rate extended sample: 30 months</code></pre>
-<pre class="r"><code>if (nrow(df_m_def_ext) &gt;= 5) {
-  m_def_ext &lt;- lm(d_default_rate_yoy ~ selic + g_yoy_ibc_br + ln_cust,
-                  data = df_m_def_ext)
-  nw_lag_de &lt;- max(1, floor(0.75 * nrow(df_m_def_ext)^(1/3)))
-  nw_def_ext &lt;- NeweyWest(m_def_ext, lag = nw_lag_de, prewhite = FALSE)
+m_def_ext &lt;- lm(d_default_rate_yoy ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_def_ext)
+nw_def_ext &lt;- NeweyWest(m_def_ext, lag = nw_lag(nrow(df_m_def_ext)), prewhite = FALSE)
 
-  cat(&quot;\n--- YoY Change in Default Rate ~ Selic + IBC-Br + ln(Customers) ---\n&quot;)
-  coeftest(m_def_ext, vcov = nw_def_ext)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_def_ext)$r.squared, 4), &quot;\n&quot;)
-} else {
-  cat(&quot;Insufficient observations for default rate extended model.\n&quot;)
-}</code></pre>
+cat(&quot;Default + OF: N =&quot;, nrow(df_m_def_ext), &quot;, R² =&quot;, round(summary(m_def_ext)$r.squared, 4), &quot;\n&quot;)</code></pre>
+<pre><code>## Default + OF: N = 30 , R&lt;U+00B2&gt; = 0.9594</code></pre>
+<pre class="r"><code>coeftest(m_def_ext, vcov = nw_def_ext)</code></pre>
 <pre><code>## 
-## --- YoY Change in Default Rate ~ Selic + IBC-Br + ln(Customers) ---
+## t test of coefficients:
 ## 
-## R-squared: 0.9594</code></pre>
+##               Estimate Std. Error t value  Pr(&gt;|t|)    
+## (Intercept)   4.849868   1.248198  3.8855 0.0006298 ***
+## selic         0.263118   0.013907 18.9200 &lt; 2.2e-16 ***
+## g_yoy_ibc_br -0.027543   0.012374 -2.2259 0.0349028 *  
+## ln_cust      -0.448864   0.076905 -5.8366 3.756e-06 ***
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
 </div>
 <div id="default-rate-by-client-type-1" class="section level2" number="11.3">
 <h2><span class="header-section-number">11.3</span> Default Rate by
 Client Type</h2>
 <pre class="r"><code># PF
 df_m_def_pf &lt;- df_feat %&gt;%
-  select(month, d_default_pf_yoy, selic, g_yoy_ibc_br, ln_cust) %&gt;%
-  drop_na()
+  select(month, d_default_pf_yoy, selic, g_yoy_ibc_br, ln_cust) %&gt;% drop_na()
 
-if (nrow(df_m_def_pf) &gt;= 5) {
-  m_def_pf &lt;- lm(d_default_pf_yoy ~ selic + g_yoy_ibc_br + ln_cust,
-                 data = df_m_def_pf)
-  nw_def_pf &lt;- NeweyWest(m_def_pf,
-                         lag = max(1, floor(0.75 * nrow(df_m_def_pf)^(1/3))),
-                         prewhite = FALSE)
+m_def_pf &lt;- lm(d_default_pf_yoy ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_def_pf)
+nw_def_pf &lt;- NeweyWest(m_def_pf, lag = nw_lag(nrow(df_m_def_pf)), prewhite = FALSE)
 
-  cat(&quot;--- YoY Change in PF Default Rate ~ Selic + IBC-Br + ln(Customers) ---\n&quot;)
-  cat(&quot;Sample:&quot;, nrow(df_m_def_pf), &quot;months\n\n&quot;)
-  coeftest(m_def_pf, vcov = nw_def_pf)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_def_pf)$r.squared, 4), &quot;\n&quot;)
-}</code></pre>
-<pre><code>## --- YoY Change in PF Default Rate ~ Selic + IBC-Br + ln(Customers) ---
-## Sample: 30 months
+cat(&quot;Default PF + OF: N =&quot;, nrow(df_m_def_pf), &quot;, R² =&quot;, round(summary(m_def_pf)$r.squared, 4), &quot;\n&quot;)</code></pre>
+<pre><code>## Default PF + OF: N = 30 , R&lt;U+00B2&gt; = 0.9348</code></pre>
+<pre class="r"><code>coeftest(m_def_pf, vcov = nw_def_pf)</code></pre>
+<pre><code>## 
+## t test of coefficients:
 ## 
-## 
-## R-squared: 0.9348</code></pre>
+##               Estimate Std. Error t value  Pr(&gt;|t|)    
+## (Intercept)  -0.645386   0.930508 -0.6936  0.494094    
+## selic         0.313735   0.015757 19.9113 &lt; 2.2e-16 ***
+## g_yoy_ibc_br  0.037091   0.010650  3.4826  0.001773 ** 
+## ln_cust      -0.185093   0.055278 -3.3484  0.002488 ** 
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
 <pre class="r"><code># PJ
 df_m_def_pj &lt;- df_feat %&gt;%
-  select(month, d_default_pj_yoy, selic, g_yoy_ibc_br, ln_cust) %&gt;%
-  drop_na()
+  select(month, d_default_pj_yoy, selic, g_yoy_ibc_br, ln_cust) %&gt;% drop_na()
 
-if (nrow(df_m_def_pj) &gt;= 5) {
-  m_def_pj &lt;- lm(d_default_pj_yoy ~ selic + g_yoy_ibc_br + ln_cust,
-                 data = df_m_def_pj)
-  nw_def_pj &lt;- NeweyWest(m_def_pj,
-                         lag = max(1, floor(0.75 * nrow(df_m_def_pj)^(1/3))),
-                         prewhite = FALSE)
+m_def_pj &lt;- lm(d_default_pj_yoy ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_def_pj)
+nw_def_pj &lt;- NeweyWest(m_def_pj, lag = nw_lag(nrow(df_m_def_pj)), prewhite = FALSE)
 
-  cat(&quot;\n--- YoY Change in PJ Default Rate ~ Selic + IBC-Br + ln(Customers) ---\n&quot;)
-  cat(&quot;Sample:&quot;, nrow(df_m_def_pj), &quot;months\n\n&quot;)
-  coeftest(m_def_pj, vcov = nw_def_pj)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_def_pj)$r.squared, 4), &quot;\n&quot;)
-}</code></pre>
+cat(&quot;\nDefault PJ + OF: N =&quot;, nrow(df_m_def_pj), &quot;, R² =&quot;, round(summary(m_def_pj)$r.squared, 4), &quot;\n&quot;)</code></pre>
 <pre><code>## 
-## --- YoY Change in PJ Default Rate ~ Selic + IBC-Br + ln(Customers) ---
-## Sample: 30 months
+## Default PJ + OF: N = 30 , R&lt;U+00B2&gt; = 0.7082</code></pre>
+<pre class="r"><code>coeftest(m_def_pj, vcov = nw_def_pj)</code></pre>
+<pre><code>## 
+## t test of coefficients:
 ## 
-## 
-## R-squared: 0.7082</code></pre>
+##               Estimate Std. Error t value Pr(&gt;|t|)    
+## (Intercept)  11.914766   3.841474  3.1016 0.004592 ** 
+## selic         0.169073   0.034501  4.9005 4.37e-05 ***
+## g_yoy_ibc_br -0.129455   0.037934 -3.4127 0.002116 ** 
+## ln_cust      -0.764909   0.238709 -3.2044 0.003564 ** 
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
 </div>
 </div>
 <div id="alternative-specification-month-over-month-growth" class="section level1" number="12">
@@ -1386,50 +1335,44 @@ if (nrow(df_m_def_pj) &gt;= 5) {
 Specification: Month-over-Month Growth</h1>
 <p>For robustness, we also estimate credit models using MoM growth
 rates.</p>
-<pre class="r"><code># MoM Credit Growth ~ Selic + IBC-Br
-df_mom_cred &lt;- df_feat %&gt;%
-  select(month, g_mom_credit, selic, g_mom_ibc_br) %&gt;%
-  drop_na()
+<pre class="r"><code>df_mom_cred &lt;- df_feat %&gt;%
+  select(month, g_mom_credit, selic, g_mom_ibc_br) %&gt;% drop_na()
 
-cat(&quot;MoM credit baseline sample:&quot;, nrow(df_mom_cred), &quot;months\n&quot;)</code></pre>
-<pre><code>## MoM credit baseline sample: 55 months</code></pre>
-<pre class="r"><code>if (nrow(df_mom_cred) &gt;= 5) {
-  m_mom_cred &lt;- lm(g_mom_credit ~ selic + g_mom_ibc_br, data = df_mom_cred)
-  nw_mom_cred &lt;- NeweyWest(m_mom_cred,
-                           lag = max(1, floor(0.75 * nrow(df_mom_cred)^(1/3))),
-                           prewhite = FALSE)
+m_mom_cred &lt;- lm(g_mom_credit ~ selic + g_mom_ibc_br, data = df_mom_cred)
+nw_mom_cred &lt;- NeweyWest(m_mom_cred, lag = nw_lag(nrow(df_mom_cred)), prewhite = FALSE)
 
-  cat(&quot;\n--- Credit MoM Growth ~ Selic + IBC-Br MoM Growth ---\n&quot;)
-  coeftest(m_mom_cred, vcov = nw_mom_cred)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_mom_cred)$r.squared, 4), &quot;\n&quot;)
-}</code></pre>
+cat(&quot;Credit MoM baseline: N =&quot;, nrow(df_mom_cred), &quot;, R² =&quot;, round(summary(m_mom_cred)$r.squared, 4), &quot;\n&quot;)</code></pre>
+<pre><code>## Credit MoM baseline: N = 55 , R&lt;U+00B2&gt; = 0.1015</code></pre>
+<pre class="r"><code>coeftest(m_mom_cred, vcov = nw_mom_cred)</code></pre>
 <pre><code>## 
-## --- Credit MoM Growth ~ Selic + IBC-Br MoM Growth ---
+## t test of coefficients:
 ## 
-## R-squared: 0.1015</code></pre>
-<pre class="r"><code># MoM Credit Growth ~ Selic + IBC-Br + ln(Customers)
-df_mom_cred_ext &lt;- df_feat %&gt;%
-  select(month, g_mom_credit, selic, g_mom_ibc_br, ln_cust) %&gt;%
-  drop_na()
+##               Estimate Std. Error t value  Pr(&gt;|t|)    
+## (Intercept)   1.298941   0.269315  4.8231 1.275e-05 ***
+## selic        -0.033699   0.023550 -1.4309   0.15844    
+## g_mom_ibc_br  0.035399   0.015496  2.2844   0.02646 *  
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
+<pre class="r"><code>df_mom_cred_ext &lt;- df_feat %&gt;%
+  select(month, g_mom_credit, selic, g_mom_ibc_br, ln_cust) %&gt;% drop_na()
 
-cat(&quot;\nMoM credit extended sample:&quot;, nrow(df_mom_cred_ext), &quot;months\n&quot;)</code></pre>
-<pre><code>## 
-## MoM credit extended sample: 30 months</code></pre>
-<pre class="r"><code>if (nrow(df_mom_cred_ext) &gt;= 5) {
-  m_mom_cred_ext &lt;- lm(g_mom_credit ~ selic + g_mom_ibc_br + ln_cust,
-                       data = df_mom_cred_ext)
-  nw_mom_cred_ext &lt;- NeweyWest(m_mom_cred_ext,
-                               lag = max(1, floor(0.75 * nrow(df_mom_cred_ext)^(1/3))),
-                               prewhite = FALSE)
+m_mom_cred_ext &lt;- lm(g_mom_credit ~ selic + g_mom_ibc_br + ln_cust, data = df_mom_cred_ext)
+nw_mom_cred_ext &lt;- NeweyWest(m_mom_cred_ext, lag = nw_lag(nrow(df_mom_cred_ext)), prewhite = FALSE)
 
-  cat(&quot;\n--- Credit MoM Growth ~ Selic + IBC-Br MoM + ln(Customers) ---\n&quot;)
-  coeftest(m_mom_cred_ext, vcov = nw_mom_cred_ext)
-  cat(&quot;\nR-squared:&quot;, round(summary(m_mom_cred_ext)$r.squared, 4), &quot;\n&quot;)
-}</code></pre>
+cat(&quot;\nCredit MoM + OF: N =&quot;, nrow(df_mom_cred_ext), &quot;, R² =&quot;, round(summary(m_mom_cred_ext)$r.squared, 4), &quot;\n&quot;)</code></pre>
 <pre><code>## 
-## --- Credit MoM Growth ~ Selic + IBC-Br MoM + ln(Customers) ---
+## Credit MoM + OF: N = 30 , R&lt;U+00B2&gt; = 0.2386</code></pre>
+<pre class="r"><code>coeftest(m_mom_cred_ext, vcov = nw_mom_cred_ext)</code></pre>
+<pre><code>## 
+## t test of coefficients:
 ## 
-## R-squared: 0.2386</code></pre>
+##               Estimate Std. Error t value  Pr(&gt;|t|)    
+## (Intercept)  -5.266751   2.459874 -2.1411 0.0418138 *  
+## selic        -0.133623   0.035352 -3.7798 0.0008281 ***
+## g_mom_ibc_br  0.027897   0.020508  1.3603 0.1854137    
+## ln_cust       0.444209   0.144949  3.0646 0.0050283 ** 
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1</code></pre>
 </div>
 <div id="summary-of-results" class="section level1" number="13">
 <h1><span class="header-section-number">13</span> Summary of
@@ -1440,80 +1383,44 @@ Results</h1>
     Model = label,
     Term = rownames(ct),
     Estimate = ct[, &quot;Estimate&quot;],
-    `Std. Error (HAC)` = ct[, &quot;Std. Error&quot;],
-    `t value` = ct[, &quot;t value&quot;],
-    `p value` = ct[, &quot;Pr(&gt;|t|)&quot;],
+    `SE (HAC)` = ct[, &quot;Std. Error&quot;],
+    `t` = ct[, &quot;t value&quot;],
+    `p` = ct[, &quot;Pr(&gt;|t|)&quot;],
     R2 = summary(model)$r.squared,
     N = nobs(model)
   )
 }
 
-# Collect all estimated models
-results_list &lt;- list()
+models &lt;- list(
+  &quot;Credit Base (YoY)&quot;  = list(m_cred_base, nw_cred_base),
+  &quot;Credit + OF (YoY)&quot;  = list(m_cred_ext, nw_cred_ext),
+  &quot;Credit PF + OF&quot;     = list(m_pf, nw_pf),
+  &quot;Credit PJ + OF&quot;     = list(m_pj, nw_pj),
+  &quot;PF Card + OF&quot;       = list(m_card, nw_card),
+  &quot;PF Personal + OF&quot;   = list(m_pers, nw_pers),
+  &quot;PF Housing + OF&quot;    = list(m_house, nw_house),
+  &quot;Default Base (YoY)&quot; = list(m_def_base, nw_def_base),
+  &quot;Default + OF (YoY)&quot; = list(m_def_ext, nw_def_ext),
+  &quot;Default PF + OF&quot;    = list(m_def_pf, nw_def_pf),
+  &quot;Default PJ + OF&quot;    = list(m_def_pj, nw_def_pj),
+  &quot;Credit Base (MoM)&quot;  = list(m_mom_cred, nw_mom_cred),
+  &quot;Credit + OF (MoM)&quot;  = list(m_mom_cred_ext, nw_mom_cred_ext)
+)
 
-# Credit growth models
-if (exists(&quot;m_cred_base&quot;)) {
-  results_list[[&quot;Credit Base (YoY)&quot;]] &lt;- extract_results(m_cred_base, nw_cred_base, &quot;Credit Base (YoY)&quot;)
-}
-if (exists(&quot;m_cred_ext&quot;)) {
-  results_list[[&quot;Credit + OF (YoY)&quot;]] &lt;- extract_results(m_cred_ext, nw_cred_ext, &quot;Credit + OF (YoY)&quot;)
-}
-if (exists(&quot;m_mom_cred&quot;)) {
-  results_list[[&quot;Credit Base (MoM)&quot;]] &lt;- extract_results(m_mom_cred, nw_mom_cred, &quot;Credit Base (MoM)&quot;)
-}
-if (exists(&quot;m_mom_cred_ext&quot;)) {
-  results_list[[&quot;Credit + OF (MoM)&quot;]] &lt;- extract_results(m_mom_cred_ext, nw_mom_cred_ext, &quot;Credit + OF (MoM)&quot;)
-}
-
-# PF/PJ credit growth models
-if (exists(&quot;m_pf&quot;)) {
-  results_list[[&quot;Credit PF + OF&quot;]] &lt;- extract_results(m_pf, nw_pf, &quot;Credit PF + OF&quot;)
-}
-if (exists(&quot;m_pj&quot;)) {
-  results_list[[&quot;Credit PJ + OF&quot;]] &lt;- extract_results(m_pj, nw_pj, &quot;Credit PJ + OF&quot;)
-}
-
-# PF modality models
-if (exists(&quot;m_card&quot;)) {
-  results_list[[&quot;PF Card + OF&quot;]] &lt;- extract_results(m_card, nw_card, &quot;PF Card + OF&quot;)
-}
-if (exists(&quot;m_pers&quot;)) {
-  results_list[[&quot;PF Personal + OF&quot;]] &lt;- extract_results(m_pers, nw_pers, &quot;PF Personal + OF&quot;)
-}
-if (exists(&quot;m_house&quot;)) {
-  results_list[[&quot;PF Housing + OF&quot;]] &lt;- extract_results(m_house, nw_house, &quot;PF Housing + OF&quot;)
-}
-
-# Default rate models
-if (exists(&quot;m_def_base&quot;)) {
-  results_list[[&quot;Default Base (YoY)&quot;]] &lt;- extract_results(m_def_base, nw_def_base, &quot;Default Base (YoY)&quot;)
-}
-if (exists(&quot;m_def_ext&quot;)) {
-  results_list[[&quot;Default + OF (YoY)&quot;]] &lt;- extract_results(m_def_ext, nw_def_ext, &quot;Default + OF (YoY)&quot;)
-}
-if (exists(&quot;m_def_pf&quot;)) {
-  results_list[[&quot;Default PF + OF&quot;]] &lt;- extract_results(m_def_pf, nw_def_pf, &quot;Default PF + OF&quot;)
-}
-if (exists(&quot;m_def_pj&quot;)) {
-  results_list[[&quot;Default PJ + OF&quot;]] &lt;- extract_results(m_def_pj, nw_def_pj, &quot;Default PJ + OF&quot;)
-}
-
-results &lt;- bind_rows(results_list)
-
-results %&gt;%
+map2_dfr(names(models), models, ~ extract_results(.y[[1]], .y[[2]], .x)) %&gt;%
   mutate(across(where(is.numeric), ~ round(.x, 4))) %&gt;%
   knitr::kable(caption = &quot;Regression Results Summary — Impact of Open Finance on Credit&quot;)</code></pre>
-<table>
+<table style="width:100%;">
 <caption>Regression Results Summary &lt;U+2014&gt; Impact of Open
 Finance on Credit</caption>
 <colgroup>
-<col width="22%" />
-<col width="15%" />
+<col width="25%" />
+<col width="17%" />
+<col width="13%" />
 <col width="11%" />
-<col width="20%" />
+<col width="10%" />
 <col width="9%" />
 <col width="9%" />
-<col width="8%" />
 <col width="3%" />
 </colgroup>
 <thead>
@@ -1521,9 +1428,9 @@ Finance on Credit</caption>
 <th align="left">Model</th>
 <th align="left">Term</th>
 <th align="right">Estimate</th>
-<th align="right">Std. Error (HAC)</th>
-<th align="right">t value</th>
-<th align="right">p value</th>
+<th align="right">SE (HAC)</th>
+<th align="right">t</th>
+<th align="right">p</th>
 <th align="right">R2</th>
 <th align="right">N</th>
 </tr>
@@ -1600,76 +1507,6 @@ Finance on Credit</caption>
 <td align="right">30</td>
 </tr>
 <tr class="even">
-<td align="left">Credit Base (MoM)</td>
-<td align="left">(Intercept)</td>
-<td align="right">1.2989</td>
-<td align="right">0.2693</td>
-<td align="right">4.8231</td>
-<td align="right">0.0000</td>
-<td align="right">0.1015</td>
-<td align="right">55</td>
-</tr>
-<tr class="odd">
-<td align="left">Credit Base (MoM)</td>
-<td align="left">selic</td>
-<td align="right">-0.0337</td>
-<td align="right">0.0236</td>
-<td align="right">-1.4309</td>
-<td align="right">0.1584</td>
-<td align="right">0.1015</td>
-<td align="right">55</td>
-</tr>
-<tr class="even">
-<td align="left">Credit Base (MoM)</td>
-<td align="left">g_mom_ibc_br</td>
-<td align="right">0.0354</td>
-<td align="right">0.0155</td>
-<td align="right">2.2844</td>
-<td align="right">0.0265</td>
-<td align="right">0.1015</td>
-<td align="right">55</td>
-</tr>
-<tr class="odd">
-<td align="left">Credit + OF (MoM)</td>
-<td align="left">(Intercept)</td>
-<td align="right">-5.2668</td>
-<td align="right">2.4599</td>
-<td align="right">-2.1411</td>
-<td align="right">0.0418</td>
-<td align="right">0.2386</td>
-<td align="right">30</td>
-</tr>
-<tr class="even">
-<td align="left">Credit + OF (MoM)</td>
-<td align="left">selic</td>
-<td align="right">-0.1336</td>
-<td align="right">0.0354</td>
-<td align="right">-3.7798</td>
-<td align="right">0.0008</td>
-<td align="right">0.2386</td>
-<td align="right">30</td>
-</tr>
-<tr class="odd">
-<td align="left">Credit + OF (MoM)</td>
-<td align="left">g_mom_ibc_br</td>
-<td align="right">0.0279</td>
-<td align="right">0.0205</td>
-<td align="right">1.3603</td>
-<td align="right">0.1854</td>
-<td align="right">0.2386</td>
-<td align="right">30</td>
-</tr>
-<tr class="even">
-<td align="left">Credit + OF (MoM)</td>
-<td align="left">ln_cust</td>
-<td align="right">0.4442</td>
-<td align="right">0.1449</td>
-<td align="right">3.0646</td>
-<td align="right">0.0050</td>
-<td align="right">0.2386</td>
-<td align="right">30</td>
-</tr>
-<tr class="odd">
 <td align="left">Credit PF + OF</td>
 <td align="left">(Intercept)</td>
 <td align="right">51.8739</td>
@@ -1679,7 +1516,7 @@ Finance on Credit</caption>
 <td align="right">0.6896</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">Credit PF + OF</td>
 <td align="left">selic</td>
 <td align="right">0.7079</td>
@@ -1689,7 +1526,7 @@ Finance on Credit</caption>
 <td align="right">0.6896</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">Credit PF + OF</td>
 <td align="left">g_yoy_ibc_br</td>
 <td align="right">0.5088</td>
@@ -1699,7 +1536,7 @@ Finance on Credit</caption>
 <td align="right">0.6896</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">Credit PF + OF</td>
 <td align="left">ln_cust</td>
 <td align="right">-2.9173</td>
@@ -1709,7 +1546,7 @@ Finance on Credit</caption>
 <td align="right">0.6896</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">Credit PJ + OF</td>
 <td align="left">(Intercept)</td>
 <td align="right">-80.9954</td>
@@ -1719,7 +1556,7 @@ Finance on Credit</caption>
 <td align="right">0.5973</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">Credit PJ + OF</td>
 <td align="left">selic</td>
 <td align="right">0.2930</td>
@@ -1729,7 +1566,7 @@ Finance on Credit</caption>
 <td align="right">0.5973</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">Credit PJ + OF</td>
 <td align="left">g_yoy_ibc_br</td>
 <td align="right">0.6595</td>
@@ -1739,7 +1576,7 @@ Finance on Credit</caption>
 <td align="right">0.5973</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">Credit PJ + OF</td>
 <td align="left">ln_cust</td>
 <td align="right">4.7657</td>
@@ -1749,7 +1586,7 @@ Finance on Credit</caption>
 <td align="right">0.5973</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">PF Card + OF</td>
 <td align="left">(Intercept)</td>
 <td align="right">52.9116</td>
@@ -1759,7 +1596,7 @@ Finance on Credit</caption>
 <td align="right">0.7068</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">PF Card + OF</td>
 <td align="left">selic</td>
 <td align="right">1.7877</td>
@@ -1769,7 +1606,7 @@ Finance on Credit</caption>
 <td align="right">0.7068</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">PF Card + OF</td>
 <td align="left">g_yoy_ibc_br</td>
 <td align="right">0.9065</td>
@@ -1779,7 +1616,7 @@ Finance on Credit</caption>
 <td align="right">0.7068</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">PF Card + OF</td>
 <td align="left">ln_cust</td>
 <td align="right">-3.8053</td>
@@ -1789,7 +1626,7 @@ Finance on Credit</caption>
 <td align="right">0.7068</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">PF Personal + OF</td>
 <td align="left">(Intercept)</td>
 <td align="right">-126.6616</td>
@@ -1799,7 +1636,7 @@ Finance on Credit</caption>
 <td align="right">0.5584</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">PF Personal + OF</td>
 <td align="left">selic</td>
 <td align="right">0.3293</td>
@@ -1809,7 +1646,7 @@ Finance on Credit</caption>
 <td align="right">0.5584</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">PF Personal + OF</td>
 <td align="left">g_yoy_ibc_br</td>
 <td align="right">1.1091</td>
@@ -1819,7 +1656,7 @@ Finance on Credit</caption>
 <td align="right">0.5584</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">PF Personal + OF</td>
 <td align="left">ln_cust</td>
 <td align="right">7.6409</td>
@@ -1829,7 +1666,7 @@ Finance on Credit</caption>
 <td align="right">0.5584</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">PF Housing + OF</td>
 <td align="left">(Intercept)</td>
 <td align="right">17.8863</td>
@@ -1839,7 +1676,7 @@ Finance on Credit</caption>
 <td align="right">0.7657</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">PF Housing + OF</td>
 <td align="left">selic</td>
 <td align="right">0.3710</td>
@@ -1849,7 +1686,7 @@ Finance on Credit</caption>
 <td align="right">0.7657</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">PF Housing + OF</td>
 <td align="left">g_yoy_ibc_br</td>
 <td align="right">0.1517</td>
@@ -1859,7 +1696,7 @@ Finance on Credit</caption>
 <td align="right">0.7657</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">PF Housing + OF</td>
 <td align="left">ln_cust</td>
 <td align="right">-0.6575</td>
@@ -1869,7 +1706,7 @@ Finance on Credit</caption>
 <td align="right">0.7657</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">Default Base (YoY)</td>
 <td align="left">(Intercept)</td>
 <td align="right">-1.5089</td>
@@ -1879,7 +1716,7 @@ Finance on Credit</caption>
 <td align="right">0.6208</td>
 <td align="right">44</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">Default Base (YoY)</td>
 <td align="left">selic</td>
 <td align="right">0.1698</td>
@@ -1889,7 +1726,7 @@ Finance on Credit</caption>
 <td align="right">0.6208</td>
 <td align="right">44</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">Default Base (YoY)</td>
 <td align="left">g_yoy_ibc_br</td>
 <td align="right">-0.0762</td>
@@ -1899,7 +1736,7 @@ Finance on Credit</caption>
 <td align="right">0.6208</td>
 <td align="right">44</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">Default + OF (YoY)</td>
 <td align="left">(Intercept)</td>
 <td align="right">4.8499</td>
@@ -1909,7 +1746,7 @@ Finance on Credit</caption>
 <td align="right">0.9594</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">Default + OF (YoY)</td>
 <td align="left">selic</td>
 <td align="right">0.2631</td>
@@ -1919,7 +1756,7 @@ Finance on Credit</caption>
 <td align="right">0.9594</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">Default + OF (YoY)</td>
 <td align="left">g_yoy_ibc_br</td>
 <td align="right">-0.0275</td>
@@ -1929,7 +1766,7 @@ Finance on Credit</caption>
 <td align="right">0.9594</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">Default + OF (YoY)</td>
 <td align="left">ln_cust</td>
 <td align="right">-0.4489</td>
@@ -1939,7 +1776,7 @@ Finance on Credit</caption>
 <td align="right">0.9594</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">Default PF + OF</td>
 <td align="left">(Intercept)</td>
 <td align="right">-0.6454</td>
@@ -1949,7 +1786,7 @@ Finance on Credit</caption>
 <td align="right">0.9348</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">Default PF + OF</td>
 <td align="left">selic</td>
 <td align="right">0.3137</td>
@@ -1959,7 +1796,7 @@ Finance on Credit</caption>
 <td align="right">0.9348</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">Default PF + OF</td>
 <td align="left">g_yoy_ibc_br</td>
 <td align="right">0.0371</td>
@@ -1969,7 +1806,7 @@ Finance on Credit</caption>
 <td align="right">0.9348</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">Default PF + OF</td>
 <td align="left">ln_cust</td>
 <td align="right">-0.1851</td>
@@ -1979,7 +1816,7 @@ Finance on Credit</caption>
 <td align="right">0.9348</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">Default PJ + OF</td>
 <td align="left">(Intercept)</td>
 <td align="right">11.9148</td>
@@ -1989,7 +1826,7 @@ Finance on Credit</caption>
 <td align="right">0.7082</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">Default PJ + OF</td>
 <td align="left">selic</td>
 <td align="right">0.1691</td>
@@ -1999,7 +1836,7 @@ Finance on Credit</caption>
 <td align="right">0.7082</td>
 <td align="right">30</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td align="left">Default PJ + OF</td>
 <td align="left">g_yoy_ibc_br</td>
 <td align="right">-0.1295</td>
@@ -2009,7 +1846,7 @@ Finance on Credit</caption>
 <td align="right">0.7082</td>
 <td align="right">30</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td align="left">Default PJ + OF</td>
 <td align="left">ln_cust</td>
 <td align="right">-0.7649</td>
@@ -2017,6 +1854,76 @@ Finance on Credit</caption>
 <td align="right">-3.2044</td>
 <td align="right">0.0036</td>
 <td align="right">0.7082</td>
+<td align="right">30</td>
+</tr>
+<tr class="odd">
+<td align="left">Credit Base (MoM)</td>
+<td align="left">(Intercept)</td>
+<td align="right">1.2989</td>
+<td align="right">0.2693</td>
+<td align="right">4.8231</td>
+<td align="right">0.0000</td>
+<td align="right">0.1015</td>
+<td align="right">55</td>
+</tr>
+<tr class="even">
+<td align="left">Credit Base (MoM)</td>
+<td align="left">selic</td>
+<td align="right">-0.0337</td>
+<td align="right">0.0236</td>
+<td align="right">-1.4309</td>
+<td align="right">0.1584</td>
+<td align="right">0.1015</td>
+<td align="right">55</td>
+</tr>
+<tr class="odd">
+<td align="left">Credit Base (MoM)</td>
+<td align="left">g_mom_ibc_br</td>
+<td align="right">0.0354</td>
+<td align="right">0.0155</td>
+<td align="right">2.2844</td>
+<td align="right">0.0265</td>
+<td align="right">0.1015</td>
+<td align="right">55</td>
+</tr>
+<tr class="even">
+<td align="left">Credit + OF (MoM)</td>
+<td align="left">(Intercept)</td>
+<td align="right">-5.2668</td>
+<td align="right">2.4599</td>
+<td align="right">-2.1411</td>
+<td align="right">0.0418</td>
+<td align="right">0.2386</td>
+<td align="right">30</td>
+</tr>
+<tr class="odd">
+<td align="left">Credit + OF (MoM)</td>
+<td align="left">selic</td>
+<td align="right">-0.1336</td>
+<td align="right">0.0354</td>
+<td align="right">-3.7798</td>
+<td align="right">0.0008</td>
+<td align="right">0.2386</td>
+<td align="right">30</td>
+</tr>
+<tr class="even">
+<td align="left">Credit + OF (MoM)</td>
+<td align="left">g_mom_ibc_br</td>
+<td align="right">0.0279</td>
+<td align="right">0.0205</td>
+<td align="right">1.3603</td>
+<td align="right">0.1854</td>
+<td align="right">0.2386</td>
+<td align="right">30</td>
+</tr>
+<tr class="odd">
+<td align="left">Credit + OF (MoM)</td>
+<td align="left">ln_cust</td>
+<td align="right">0.4442</td>
+<td align="right">0.1449</td>
+<td align="right">3.0646</td>
+<td align="right">0.0050</td>
+<td align="right">0.2386</td>
 <td align="right">30</td>
 </tr>
 </tbody>
@@ -2030,75 +1937,105 @@ Open Finance</h2>
 <p>The extended credit growth model tests whether Open Finance adoption
 (<span class="math inline">\(\ln(\text{Customers})\)</span>) is
 associated with faster credit growth after controlling for the Selic
-rate and economic activity (IBC-Br). A positive and significant
-coefficient on <span class="math inline">\(\ln(\text{Customers})\)</span> would suggest that
-Open Finance is associated with credit expansion — consistent with the
-hypothesis that data-sharing reduces information asymmetries and enables
-broader lending.</p>
-<p>Key considerations:</p>
+rate and economic activity (IBC-Br).</p>
+<p><strong>Key results:</strong></p>
 <ul>
-<li><strong>Selic</strong>: Higher interest rates are expected to dampen
-credit growth (<span class="math inline">\(\hat{\beta}_1 &lt;
-0\)</span>) as borrowing costs increase and both supply and demand
-contract.</li>
-<li><strong>IBC-Br</strong>: Stronger economic activity should support
-credit growth (<span class="math inline">\(\hat{\beta}_2 &gt;
-0\)</span>) through both higher demand for credit and improved
-creditworthiness.</li>
-<li><strong>Open Finance adoption</strong>: A positive <span class="math inline">\(\hat{\beta}_3\)</span> is consistent with Open
-Finance enabling credit expansion, but could also reflect concurrent
-digitization trends.</li>
+<li><strong>PF Personal Loans</strong> show the strongest Open Finance
+association: <span class="math inline">\(\hat{\beta}_{\ln(Cust)} =
+7.64\)</span> (<span class="math inline">\(p = 0.003\)</span>, <span class="math inline">\(R^2 = 0.56\)</span>). A 10% increase in Open
+Finance customers is associated with a 0.73 pp increase in YoY personal
+loan growth. This is the segment where information asymmetry is highest
+and data portability should matter most.</li>
+<li><strong>PF Housing</strong> shows a <em>negative</em> coefficient:
+<span class="math inline">\(\hat{\beta}_{\ln(Cust)} = -0.66\)</span>
+(<span class="math inline">\(p = 0.001\)</span>, <span class="math inline">\(R^2 = 0.77\)</span>). Housing credit growth is
+slowing as Open Finance expands, but this likely reflects tightening
+monetary policy and the high Selic sensitivity of this modality (<span class="math inline">\(\hat{\beta}_{Selic} = 0.37\)</span>, <span class="math inline">\(p &lt; 0.001\)</span>) rather than a negative Open
+Finance effect. Housing credit is long-duration and responds to rate
+cycles with a lag.</li>
 </ul>
 </div>
 <div id="default-rates-and-open-finance" class="section level2" number="14.2">
 <h2><span class="header-section-number">14.2</span> Default Rates and
 Open Finance</h2>
-<p>The default rate model tests whether Open Finance adoption is
-associated with declining default rates. A negative coefficient on <span class="math inline">\(\ln(\text{Customers})\)</span> would suggest that
-information-sharing improves credit quality — consistent with the
-hypothesis that better data allows lenders to screen borrowers more
-effectively.</p>
-<p>Key considerations:</p>
-<ul>
-<li>Declining default rates during a period of Open Finance expansion
-could reflect improved risk assessment (causal) or simply economic
-recovery reducing distress (confounding).</li>
-<li>The PF (individual) vs. PJ (firm) breakdown helps distinguish
-channels: individuals may benefit more from data portability if their
-credit histories were previously fragmented across institutions.</li>
-</ul>
+<p>All default rate models show a <strong>negative and
+significant</strong> coefficient on <span class="math inline">\(\ln(\text{Customers})\)</span>, consistent with
+Open Finance improving credit quality:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Model</th>
+<th><span class="math inline">\(\hat{\beta}_{\ln(Cust)}\)</span></th>
+<th>p-value</th>
+<th><span class="math inline">\(R^2\)</span></th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Default Total + OF</td>
+<td>−0.449</td>
+<td>&lt;0.001</td>
+<td>0.959</td>
+</tr>
+<tr class="even">
+<td>Default PF + OF</td>
+<td>−0.185</td>
+<td>0.003</td>
+<td>0.935</td>
+</tr>
+<tr class="odd">
+<td>Default PJ + OF</td>
+<td>−0.765</td>
+<td>0.004</td>
+<td>0.708</td>
+</tr>
+</tbody>
+</table>
+<p>The total default rate model has the highest explanatory power (<span class="math inline">\(R^2 = 0.96\)</span>), and adding <span class="math inline">\(\ln(\text{Customers})\)</span> raises <span class="math inline">\(R^2\)</span> from 0.62 (baseline) to 0.96 — a
+dramatic improvement. This suggests Open Finance adoption captures
+important variation in default rates not explained by Selic and IBC-Br
+alone.</p>
 </div>
 <div id="pf-vs.-pj-differential-effects" class="section level2" number="14.3">
 <h2><span class="header-section-number">14.3</span> PF vs. PJ
 Differential Effects</h2>
-<p>Open Finance is expected to have a stronger impact on
-<strong>individual (PF) credit</strong> because:</p>
+<p>Contrary to the ex-ante hypothesis that individuals would benefit
+more from data portability, the <strong>PJ (firm) default rate</strong>
+shows a larger Open Finance coefficient (<span class="math inline">\(-0.76\)</span>) than PF (<span class="math inline">\(-0.19\)</span>). This could reflect:</p>
 <ol style="list-style-type: decimal">
-<li>Individuals are more likely to have fragmented financial
-relationships across multiple institutions.</li>
-<li>Data portability enables “thin-file” borrowers to demonstrate
-creditworthiness using transaction history.</li>
-<li>Firms already have established credit relationships and more
-standardized financial reporting.</li>
+<li><strong>Small and micro enterprises (MEIs)</strong> with thin credit
+files benefiting from Open Finance data sharing — these are effectively
+“individuals” running businesses.</li>
+<li><strong>Compositional effects</strong>: the PJ portfolio may be more
+sensitive to information improvements because corporate credit decisions
+rely more on cash flow data that Open Finance makes portable.</li>
+<li><strong>Confounding</strong>: PJ defaults may be driven by pandemic
+recovery dynamics that happen to correlate with the Open Finance rollout
+period.</li>
 </ol>
-<p>A larger positive <span class="math inline">\(\hat{\beta}_3\)</span>
-for PF credit growth (or a more negative <span class="math inline">\(\hat{\beta}_3\)</span> for PF default rates)
-relative to PJ would be consistent with this channel.</p>
+<p>For credit <em>growth</em>, PF personal loans (<span class="math inline">\(\hat{\beta}_3 = 7.64\)</span>) show a much
+stronger association than aggregate credit, consistent with Open Finance
+enabling lending in the highest-friction consumer segment.</p>
 </div>
 <div id="pf-modality-analysis" class="section level2" number="14.4">
 <h2><span class="header-section-number">14.4</span> PF Modality
 Analysis</h2>
-<p>Within individual credit, Open Finance is most likely to affect
-segments where <strong>information asymmetry is highest</strong>:</p>
+<p>The modality-level results align with the information asymmetry
+channel:</p>
 <ul>
-<li><strong>Personal loans (sem consignação)</strong>: unsecured,
-highest information friction — strongest expected effect.</li>
-<li><strong>Credit cards</strong>: revolving credit with frequent usage
-data — data portability can improve limit allocation.</li>
-<li><strong>Housing</strong>: long-term secured credit where income
-verification matters — moderate expected effect.</li>
-<li><strong>Payroll loans (consignação)</strong>: already low-risk
-(deducted from salary) — minimal expected effect.</li>
+<li><strong>Personal loans (sem consignação)</strong>: <span class="math inline">\(\hat{\beta}_3 = 7.64\)</span>, <span class="math inline">\(p = 0.003\)</span> — <strong>strongest positive
+effect</strong>. These are unsecured loans where borrower screening
+depends most on financial history data. Open Finance makes this data
+portable, enabling competition and access.</li>
+<li><strong>Housing</strong>: <span class="math inline">\(\hat{\beta}_3
+= -0.66\)</span>, <span class="math inline">\(p = 0.001\)</span> —
+negative but likely driven by the interest rate cycle. Housing credit is
+the most Selic-sensitive modality, and the 2022–2024 high-Selic
+environment suppressed mortgage origination regardless of Open
+Finance.</li>
+<li><strong>Payroll loans (consignação)</strong>: Expected to show
+minimal Open Finance effect since repayment is guaranteed through salary
+deduction — information asymmetry is already low in this segment.</li>
 </ul>
 </div>
 </div>
@@ -2172,14 +2109,6 @@ separate pandemic recovery effects from Open Finance effects.</p></li>
 <tr class="even">
 <td><code>lmtest</code></td>
 <td>Coefficient testing with robust SEs</td>
-</tr>
-<tr class="odd">
-<td><code>broom</code></td>
-<td>Tidy model output</td>
-</tr>
-<tr class="even">
-<td><code>zoo</code></td>
-<td>Time-series utilities</td>
 </tr>
 <tr class="odd">
 <td><code>gridExtra</code></td>
