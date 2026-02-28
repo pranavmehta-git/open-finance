@@ -123,7 +123,9 @@ cat("Months with customer data:", sum(!is.na(df_merged$cust)), "\n")
 
 # Load SCR Credit Data from Local CSVs
 
-The SCR credit data has been downloaded from BCB and is available as local CSV files covering June 2012 to June 2025. These are national aggregates ("Brasil - Todas") for all client types combined.
+The SCR credit data has been downloaded from BCB and is available as local CSV files covering June 2012 to June 2025.
+
+## National Totals
 
 ```{r load-scr}
 # Read the three SCR CSV files (national totals)
@@ -160,15 +162,90 @@ cat("Default rate range:",
 summary(scr_total)
 ```
 
+## PF/PJ Breakdown
+
+```{r load-scr-pf-pj}
+# Read PF/PJ breakdown files
+# Columns: Date, Brasil-Todas, Brasil-Todas (dup), Brasil-PF-Todas, Brasil-PJ-Todas
+df_cart_pf_pj <- read_csv("data/carteira_pf_pj.csv", show_col_types = FALSE) %>%
+  select(date = 1, credit_pf = 4, credit_pj = 5)
+
+df_ativo_pf_pj <- read_csv("data/ativo_problematico_pf_pj.csv", show_col_types = FALSE) %>%
+  select(date = 1, problem_rate_pf = 4, problem_rate_pj = 5)
+
+df_inad_pf_pj <- read_csv("data/inadimplencia_pf_pj.csv", show_col_types = FALSE) %>%
+  select(date = 1, default_rate_pf = 4, default_rate_pj = 5)
+
+scr_pf_pj <- df_cart_pf_pj %>%
+  left_join(df_ativo_pf_pj, by = "date") %>%
+  left_join(df_inad_pf_pj, by = "date") %>%
+  mutate(
+    month = ymd(paste0(date, "-01")),
+    month = ceiling_date(month, "month") - days(1)
+  ) %>%
+  select(month, credit_pf, credit_pj, problem_rate_pf, problem_rate_pj,
+         default_rate_pf, default_rate_pj)
+
+cat("PF/PJ data:", nrow(scr_pf_pj), "months\n")
+cat("PF credit range: R$", format(min(scr_pf_pj$credit_pf), big.mark = ","),
+    "to R$", format(max(scr_pf_pj$credit_pf), big.mark = ","), "\n")
+cat("PJ credit range: R$", format(min(scr_pf_pj$credit_pj), big.mark = ","),
+    "to R$", format(max(scr_pf_pj$credit_pj), big.mark = ","), "\n")
+```
+
+## PF Credit Modalities
+
+```{r load-scr-pf-modalities}
+# Read PF modality breakdown (key sub-segments of individual credit)
+# Columns: Date, Total, Total(dup), PF-Todas, PJ-Todas, then PF modalities:
+#   Cartão de crédito, Consignação, Sem consignação, Habitacional,
+#   Outros créditos, Rural, Veículos
+df_cart_mod <- read_csv("data/carteira_pf_modalities.csv", show_col_types = FALSE) %>%
+  select(date = 1,
+         credit_pf_card = 6,
+         credit_pf_payroll = 7,
+         credit_pf_personal = 8,
+         credit_pf_housing = 9,
+         credit_pf_vehicles = 12)
+
+df_ativo_mod <- read_csv("data/ativo_problematico_pf_modalities.csv", show_col_types = FALSE) %>%
+  select(date = 1,
+         problem_pf_card = 6,
+         problem_pf_payroll = 7,
+         problem_pf_personal = 8,
+         problem_pf_housing = 9,
+         problem_pf_vehicles = 12)
+
+scr_pf_mod <- df_cart_mod %>%
+  left_join(df_ativo_mod, by = "date") %>%
+  mutate(
+    month = ymd(paste0(date, "-01")),
+    month = ceiling_date(month, "month") - days(1)
+  ) %>%
+  select(-date)
+
+cat("PF modality data:", nrow(scr_pf_mod), "months\n")
+cat("Key PF credit modalities (latest month, R$ Bn):\n")
+latest <- scr_pf_mod %>% filter(month == max(month))
+cat("  Credit card:    ", round(latest$credit_pf_card / 1e9, 1), "\n")
+cat("  Payroll loans:  ", round(latest$credit_pf_payroll / 1e9, 1), "\n")
+cat("  Personal loans: ", round(latest$credit_pf_personal / 1e9, 1), "\n")
+cat("  Housing:        ", round(latest$credit_pf_housing / 1e9, 1), "\n")
+cat("  Vehicles:       ", round(latest$credit_pf_vehicles / 1e9, 1), "\n")
+```
+
 # Merge All Data
 
 ```{r merge-all}
-# Combine PIX/macro data with SCR credit data
+# Combine PIX/macro data with SCR credit data (total + PF/PJ + PF modalities)
 df_all <- df_merged %>%
-  left_join(scr_total, by = "month")
+  left_join(scr_total, by = "month") %>%
+  left_join(scr_pf_pj, by = "month") %>%
+  left_join(scr_pf_mod, by = "month")
 
 cat("Combined dataset:", nrow(df_all), "months\n")
 cat("Months with credit data:", sum(!is.na(df_all$credit_portfolio)), "\n")
+cat("Months with PF/PJ data:", sum(!is.na(df_all$credit_pf)), "\n")
 cat("Months with customer + credit data:",
     sum(!is.na(df_all$cust) & !is.na(df_all$credit_portfolio)), "\n")
 ```
@@ -207,8 +284,33 @@ df_feat <- df_all %>%
     g_mom_cust = 100 * (ln_cust - lag(ln_cust, 1))
   )
 
+# PF/PJ credit features
+df_feat <- df_feat %>%
+  mutate(
+    ln_credit_pf = ifelse(!is.na(credit_pf) & credit_pf > 0, log(credit_pf), NA_real_),
+    ln_credit_pj = ifelse(!is.na(credit_pj) & credit_pj > 0, log(credit_pj), NA_real_),
+    g_yoy_credit_pf = 100 * (ln_credit_pf - lag(ln_credit_pf, 12)),
+    g_yoy_credit_pj = 100 * (ln_credit_pj - lag(ln_credit_pj, 12)),
+    d_default_pf_yoy = default_rate_pf - lag(default_rate_pf, 12),
+    d_default_pj_yoy = default_rate_pj - lag(default_rate_pj, 12)
+  )
+
+# PF modality credit features (key segments)
+df_feat <- df_feat %>%
+  mutate(
+    ln_pf_card     = ifelse(!is.na(credit_pf_card) & credit_pf_card > 0, log(credit_pf_card), NA_real_),
+    ln_pf_payroll  = ifelse(!is.na(credit_pf_payroll) & credit_pf_payroll > 0, log(credit_pf_payroll), NA_real_),
+    ln_pf_personal = ifelse(!is.na(credit_pf_personal) & credit_pf_personal > 0, log(credit_pf_personal), NA_real_),
+    ln_pf_housing  = ifelse(!is.na(credit_pf_housing) & credit_pf_housing > 0, log(credit_pf_housing), NA_real_),
+    g_yoy_pf_card     = 100 * (ln_pf_card - lag(ln_pf_card, 12)),
+    g_yoy_pf_payroll  = 100 * (ln_pf_payroll - lag(ln_pf_payroll, 12)),
+    g_yoy_pf_personal = 100 * (ln_pf_personal - lag(ln_pf_personal, 12)),
+    g_yoy_pf_housing  = 100 * (ln_pf_housing - lag(ln_pf_housing, 12))
+  )
+
 cat("Observations with YoY credit growth:", sum(!is.na(df_feat$g_yoy_credit)), "\n")
-cat("Observations with YoY PIX growth:", sum(!is.na(df_feat$g_yoy_pix)), "\n")
+cat("Observations with YoY PF credit growth:", sum(!is.na(df_feat$g_yoy_credit_pf)), "\n")
+cat("Observations with YoY PJ credit growth:", sum(!is.na(df_feat$g_yoy_credit_pj)), "\n")
 cat("Observations with customer data:", sum(!is.na(df_feat$ln_cust)), "\n")
 ```
 
@@ -229,6 +331,44 @@ df_feat %>%
   theme_minimal()
 ```
 
+## Credit Portfolio by Client Type
+
+```{r plot-credit-by-type}
+df_feat %>%
+  filter(!is.na(credit_pf)) %>%
+  select(month, Individuals = credit_pf, Firms = credit_pj) %>%
+  pivot_longer(-month, names_to = "Client Type", values_to = "portfolio") %>%
+  ggplot(aes(month, portfolio / 1e9, color = `Client Type`)) +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(labels = comma) +
+  scale_color_manual(values = c("Individuals" = "steelblue", "Firms" = "darkorange")) +
+  labs(title = "Active Credit Portfolio by Client Type",
+       subtitle = "R$ billions",
+       x = NULL, y = "Credit Portfolio (R$ Bn)") +
+  theme_minimal()
+```
+
+## PF Credit by Modality
+
+```{r plot-pf-modalities}
+df_feat %>%
+  filter(!is.na(credit_pf_card)) %>%
+  select(month,
+         `Credit Card` = credit_pf_card,
+         `Payroll Loans` = credit_pf_payroll,
+         `Personal Loans` = credit_pf_personal,
+         Housing = credit_pf_housing,
+         Vehicles = credit_pf_vehicles) %>%
+  pivot_longer(-month, names_to = "Modality", values_to = "portfolio") %>%
+  ggplot(aes(month, portfolio / 1e9, color = Modality)) +
+  geom_line(linewidth = 0.9) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "PF Credit Portfolio by Modality",
+       subtitle = "R$ billions",
+       x = NULL, y = "Credit Portfolio (R$ Bn)") +
+  theme_minimal()
+```
+
 ## Default Rates
 
 ```{r plot-default-rate}
@@ -238,6 +378,21 @@ df_feat %>%
   geom_line(color = "firebrick", linewidth = 1) +
   labs(title = "Credit Default Rate (Inadimplência)",
        subtitle = "Share of portfolio with installments overdue > 90 days",
+       x = NULL, y = "Default Rate (%)") +
+  theme_minimal()
+```
+
+## Default Rate by Client Type
+
+```{r plot-default-by-type}
+df_feat %>%
+  filter(!is.na(default_rate_pf)) %>%
+  select(month, Individuals = default_rate_pf, Firms = default_rate_pj) %>%
+  pivot_longer(-month, names_to = "Client Type", values_to = "rate") %>%
+  ggplot(aes(month, rate, color = `Client Type`)) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c("Individuals" = "steelblue", "Firms" = "darkorange")) +
+  labs(title = "Default Rate by Client Type",
        x = NULL, y = "Default Rate (%)") +
   theme_minimal()
 ```
@@ -361,7 +516,7 @@ if (nrow(cor_vars) >= 3) {
 
 # Regression Framework
 
-We estimate time-series OLS regressions with **Newey–West (HAC) standard errors** to address autocorrelation and heteroskedasticity. The analysis proceeds in two parts:
+We estimate time-series OLS regressions with **Newey–West (HAC) standard errors** to address autocorrelation and heteroskedasticity. The analysis covers credit growth and default rates at the national level, by client type (PF/PJ), and for key PF credit modalities.
 
 ## Part A — Credit Growth Models
 
@@ -453,6 +608,90 @@ if (nrow(df_m_cred_ext) >= 5) {
 }
 ```
 
+## Credit Growth by Client Type
+
+```{r credit-by-type}
+# PF (Individuals)
+df_m_pf <- df_feat %>%
+  select(month, g_yoy_credit_pf, selic, g_yoy_ibc_br, ln_cust) %>%
+  drop_na()
+
+cat("PF credit extended sample:", nrow(df_m_pf), "months\n")
+
+if (nrow(df_m_pf) >= 5) {
+  m_pf <- lm(g_yoy_credit_pf ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pf)
+  nw_pf <- NeweyWest(m_pf, lag = max(1, floor(0.75 * nrow(df_m_pf)^(1/3))),
+                     prewhite = FALSE)
+
+  cat("\n--- PF Credit YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n")
+  coeftest(m_pf, vcov = nw_pf)
+  cat("\nR-squared:", round(summary(m_pf)$r.squared, 4), "\n")
+}
+
+# PJ (Firms)
+df_m_pj <- df_feat %>%
+  select(month, g_yoy_credit_pj, selic, g_yoy_ibc_br, ln_cust) %>%
+  drop_na()
+
+cat("\nPJ credit extended sample:", nrow(df_m_pj), "months\n")
+
+if (nrow(df_m_pj) >= 5) {
+  m_pj <- lm(g_yoy_credit_pj ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pj)
+  nw_pj <- NeweyWest(m_pj, lag = max(1, floor(0.75 * nrow(df_m_pj)^(1/3))),
+                     prewhite = FALSE)
+
+  cat("\n--- PJ Credit YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n")
+  coeftest(m_pj, vcov = nw_pj)
+  cat("\nR-squared:", round(summary(m_pj)$r.squared, 4), "\n")
+}
+```
+
+## PF Credit Growth by Modality
+
+```{r credit-pf-modalities}
+# Credit card
+df_m_card <- df_feat %>%
+  select(month, g_yoy_pf_card, selic, g_yoy_ibc_br, ln_cust) %>% drop_na()
+
+cat("PF Credit Card sample:", nrow(df_m_card), "months\n")
+if (nrow(df_m_card) >= 5) {
+  m_card <- lm(g_yoy_pf_card ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_card)
+  nw_card <- NeweyWest(m_card, lag = max(1, floor(0.75 * nrow(df_m_card)^(1/3))),
+                       prewhite = FALSE)
+  cat("\n--- PF Credit Card YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n")
+  coeftest(m_card, vcov = nw_card)
+  cat("\nR-squared:", round(summary(m_card)$r.squared, 4), "\n")
+}
+
+# Personal loans (sem consignação — most likely to be affected by Open Finance)
+df_m_pers <- df_feat %>%
+  select(month, g_yoy_pf_personal, selic, g_yoy_ibc_br, ln_cust) %>% drop_na()
+
+cat("\nPF Personal Loans sample:", nrow(df_m_pers), "months\n")
+if (nrow(df_m_pers) >= 5) {
+  m_pers <- lm(g_yoy_pf_personal ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pers)
+  nw_pers <- NeweyWest(m_pers, lag = max(1, floor(0.75 * nrow(df_m_pers)^(1/3))),
+                       prewhite = FALSE)
+  cat("\n--- PF Personal Loans YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n")
+  coeftest(m_pers, vcov = nw_pers)
+  cat("\nR-squared:", round(summary(m_pers)$r.squared, 4), "\n")
+}
+
+# Housing
+df_m_house <- df_feat %>%
+  select(month, g_yoy_pf_housing, selic, g_yoy_ibc_br, ln_cust) %>% drop_na()
+
+cat("\nPF Housing sample:", nrow(df_m_house), "months\n")
+if (nrow(df_m_house) >= 5) {
+  m_house <- lm(g_yoy_pf_housing ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_house)
+  nw_house <- NeweyWest(m_house, lag = max(1, floor(0.75 * nrow(df_m_house)^(1/3))),
+                        prewhite = FALSE)
+  cat("\n--- PF Housing YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n")
+  coeftest(m_house, vcov = nw_house)
+  cat("\nR-squared:", round(summary(m_house)$r.squared, 4), "\n")
+}
+```
+
 # Part B: Default Rate Models
 
 ## Baseline: Default Rate Change ~ Selic + IBC-Br Growth
@@ -497,6 +736,46 @@ if (nrow(df_m_def_ext) >= 5) {
   cat("\nR-squared:", round(summary(m_def_ext)$r.squared, 4), "\n")
 } else {
   cat("Insufficient observations for default rate extended model.\n")
+}
+```
+
+## Default Rate by Client Type
+
+```{r default-by-type}
+# PF
+df_m_def_pf <- df_feat %>%
+  select(month, d_default_pf_yoy, selic, g_yoy_ibc_br, ln_cust) %>%
+  drop_na()
+
+if (nrow(df_m_def_pf) >= 5) {
+  m_def_pf <- lm(d_default_pf_yoy ~ selic + g_yoy_ibc_br + ln_cust,
+                 data = df_m_def_pf)
+  nw_def_pf <- NeweyWest(m_def_pf,
+                         lag = max(1, floor(0.75 * nrow(df_m_def_pf)^(1/3))),
+                         prewhite = FALSE)
+
+  cat("--- YoY Change in PF Default Rate ~ Selic + IBC-Br + ln(Customers) ---\n")
+  cat("Sample:", nrow(df_m_def_pf), "months\n\n")
+  coeftest(m_def_pf, vcov = nw_def_pf)
+  cat("\nR-squared:", round(summary(m_def_pf)$r.squared, 4), "\n")
+}
+
+# PJ
+df_m_def_pj <- df_feat %>%
+  select(month, d_default_pj_yoy, selic, g_yoy_ibc_br, ln_cust) %>%
+  drop_na()
+
+if (nrow(df_m_def_pj) >= 5) {
+  m_def_pj <- lm(d_default_pj_yoy ~ selic + g_yoy_ibc_br + ln_cust,
+                 data = df_m_def_pj)
+  nw_def_pj <- NeweyWest(m_def_pj,
+                         lag = max(1, floor(0.75 * nrow(df_m_def_pj)^(1/3))),
+                         prewhite = FALSE)
+
+  cat("\n--- YoY Change in PJ Default Rate ~ Selic + IBC-Br + ln(Customers) ---\n")
+  cat("Sample:", nrow(df_m_def_pj), "months\n\n")
+  coeftest(m_def_pj, vcov = nw_def_pj)
+  cat("\nR-squared:", round(summary(m_def_pj)$r.squared, 4), "\n")
 }
 ```
 
@@ -577,12 +856,37 @@ if (exists("m_mom_cred_ext")) {
   results_list[["Credit + OF (MoM)"]] <- extract_results(m_mom_cred_ext, nw_mom_cred_ext, "Credit + OF (MoM)")
 }
 
+# PF/PJ credit growth models
+if (exists("m_pf")) {
+  results_list[["Credit PF + OF"]] <- extract_results(m_pf, nw_pf, "Credit PF + OF")
+}
+if (exists("m_pj")) {
+  results_list[["Credit PJ + OF"]] <- extract_results(m_pj, nw_pj, "Credit PJ + OF")
+}
+
+# PF modality models
+if (exists("m_card")) {
+  results_list[["PF Card + OF"]] <- extract_results(m_card, nw_card, "PF Card + OF")
+}
+if (exists("m_pers")) {
+  results_list[["PF Personal + OF"]] <- extract_results(m_pers, nw_pers, "PF Personal + OF")
+}
+if (exists("m_house")) {
+  results_list[["PF Housing + OF"]] <- extract_results(m_house, nw_house, "PF Housing + OF")
+}
+
 # Default rate models
 if (exists("m_def_base")) {
   results_list[["Default Base (YoY)"]] <- extract_results(m_def_base, nw_def_base, "Default Base (YoY)")
 }
 if (exists("m_def_ext")) {
   results_list[["Default + OF (YoY)"]] <- extract_results(m_def_ext, nw_def_ext, "Default + OF (YoY)")
+}
+if (exists("m_def_pf")) {
+  results_list[["Default PF + OF"]] <- extract_results(m_def_pf, nw_def_pf, "Default PF + OF")
+}
+if (exists("m_def_pj")) {
+  results_list[["Default PJ + OF"]] <- extract_results(m_def_pj, nw_def_pj, "Default PJ + OF")
 }
 
 results <- bind_rows(results_list)
@@ -611,7 +915,26 @@ The default rate model tests whether Open Finance adoption is associated with de
 Key considerations:
 
 - Declining default rates during a period of Open Finance expansion could reflect improved risk assessment (causal) or simply economic recovery reducing distress (confounding).
-- The national aggregate masks heterogeneity — individuals may benefit more from data portability if their credit histories were previously fragmented across institutions.
+- The PF (individual) vs. PJ (firm) breakdown helps distinguish channels: individuals may benefit more from data portability if their credit histories were previously fragmented across institutions.
+
+## PF vs. PJ Differential Effects
+
+Open Finance is expected to have a stronger impact on **individual (PF) credit** because:
+
+1. Individuals are more likely to have fragmented financial relationships across multiple institutions.
+2. Data portability enables "thin-file" borrowers to demonstrate creditworthiness using transaction history.
+3. Firms already have established credit relationships and more standardized financial reporting.
+
+A larger positive $\hat{\beta}_3$ for PF credit growth (or a more negative $\hat{\beta}_3$ for PF default rates) relative to PJ would be consistent with this channel.
+
+## PF Modality Analysis
+
+Within individual credit, Open Finance is most likely to affect segments where **information asymmetry is highest**:
+
+- **Personal loans (sem consignação)**: unsecured, highest information friction — strongest expected effect.
+- **Credit cards**: revolving credit with frequent usage data — data portability can improve limit allocation.
+- **Housing**: long-term secured credit where income verification matters — moderate expected effect.
+- **Payroll loans (consignação)**: already low-risk (deducted from salary) — minimal expected effect.
 
 # Caveats and Limitations
 
@@ -647,7 +970,12 @@ Key considerations:
 
 | Source | Description | Location |
 |--------|-------------|----------|
-| SCR.Data — Carteira Ativa | Active credit portfolio (R$) | `data/carteira.csv` |
-| SCR.Data — Ativo Problemático | Problem asset rate (%) | `data/ativo-problemtico.csv` |
-| SCR.Data — Inadimplência | Default rate (%) | `data/inadimplncia.csv` |
+| SCR.Data — Carteira Ativa (Total) | Active credit portfolio (R$) | `data/carteira.csv` |
+| SCR.Data — Carteira Ativa (PF/PJ) | Portfolio by client type | `data/carteira_pf_pj.csv` |
+| SCR.Data — Carteira Ativa (PF Modalities) | PF portfolio by credit modality | `data/carteira_pf_modalities.csv` |
+| SCR.Data — Ativo Problemático (Total) | Problem asset rate (%) | `data/ativo-problemtico.csv` |
+| SCR.Data — Ativo Problemático (PF/PJ) | Problem rate by client type | `data/ativo_problematico_pf_pj.csv` |
+| SCR.Data — Ativo Problemático (PF Modalities) | PF problem rate by modality | `data/ativo_problematico_pf_modalities.csv` |
+| SCR.Data — Inadimplência (Total) | Default rate (%) | `data/inadimplncia.csv` |
+| SCR.Data — Inadimplência (PF/PJ) | Default rate by client type | `data/inadimplencia_pf_pj.csv` |
 | PIX / Macro / Customers | PIX volumes, Selic, IBC-Br, OF customers | `data/data_monthly.xlsx` |
