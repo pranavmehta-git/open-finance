@@ -24,8 +24,7 @@ knitr::opts_chunk$set(
 ```{r include=FALSE}
 required_pkgs <- c(
   "tidyverse", "readxl", "lubridate",
-  "scales", "broom", "sandwich", "lmtest", "zoo",
-  "janitor"
+  "scales", "broom", "sandwich", "lmtest", "zoo"
 )
 
 to_install <- required_pkgs[!required_pkgs %in% installed.packages()[,"Package"]]
@@ -39,7 +38,6 @@ library(broom)
 library(sandwich)
 library(lmtest)
 library(zoo)
-library(janitor)
 ```
 
 # Objective
@@ -96,13 +94,13 @@ From `data/data_monthly.xlsx`:
 
 ## SCR.Data — Credit Variables
 
-Monthly ZIP files from BCB, available at:
+Monthly national aggregates from BCB's SCR.Data portal, stored locally as CSV files:
 
-```
-https://www.bcb.gov.br/pda/desig/scrdata_{YEAR}.zip
-```
+- `carteira.csv` — Active credit portfolio (R$)
+- `ativo-problemtico.csv` — Problem asset rate (%)
+- `inadimplncia.csv` — Default rate (%)
 
-We download data for 2020–2025 and aggregate to national monthly totals.
+Data covers June 2012 to June 2025 (national totals, all client types).
 
 # Load Existing Data (PIX, Customers, Macro)
 
@@ -123,229 +121,42 @@ cat("PIX/Macro series:", nrow(df_long), "months,",
 cat("Months with customer data:", sum(!is.na(df_merged$cust)), "\n")
 ```
 
-# Download and Process SCR Credit Data
+# Load SCR Credit Data from Local CSVs
 
-```{r download-scr, cache=TRUE}
-scr_dir <- "data/scr_raw"
-dir.create(scr_dir, recursive = TRUE, showWarnings = FALSE)
+The SCR credit data has been downloaded from BCB and is available as local CSV files covering June 2012 to June 2025. These are national aggregates ("Brasil - Todas") for all client types combined.
 
-# Download SCR ZIP files for each year
-years <- 2020:2025
-for (yr in years) {
-  zip_path <- file.path(scr_dir, sprintf("scrdata_%d.zip", yr))
-  if (!file.exists(zip_path)) {
-    url <- sprintf("https://www.bcb.gov.br/pda/desig/scrdata_%d.zip", yr)
-    tryCatch(
-      download.file(url, zip_path, mode = "wb", quiet = TRUE),
-      error = function(e) {
-        cat("Could not download", yr, ":", conditionMessage(e), "\n")
-      }
-    )
-  }
-}
+```{r load-scr}
+# Read the three SCR CSV files (national totals)
+# Files use UTF-8 with BOM, comma-separated, with YYYY-MM date format
+df_carteira <- read_csv("data/carteira.csv", show_col_types = FALSE) %>%
+  select(date = 1, credit_portfolio = 2)
 
-# List successfully downloaded files
-zip_files <- list.files(scr_dir, pattern = "\\.zip$", full.names = TRUE)
-cat("Downloaded ZIP files:", length(zip_files), "\n")
-for (f in zip_files) cat(" ", basename(f), "-", file.size(f), "bytes\n")
-```
+df_ativo_prob <- read_csv("data/ativo-problemtico.csv", show_col_types = FALSE) %>%
+  select(date = 1, problem_asset_rate = 2)
 
-```{r extract-scr}
-# Extract all ZIP files
-csv_dir <- file.path(scr_dir, "extracted")
-dir.create(csv_dir, recursive = TRUE, showWarnings = FALSE)
+df_inadimplencia <- read_csv("data/inadimplncia.csv", show_col_types = FALSE) %>%
+  select(date = 1, default_rate = 2)
 
-for (zf in zip_files) {
-  tryCatch(
-    unzip(zf, exdir = csv_dir, overwrite = FALSE),
-    error = function(e) cat("Error extracting", basename(zf), ":", conditionMessage(e), "\n")
-  )
-}
-
-csv_files <- list.files(csv_dir, pattern = "\\.csv$", full.names = TRUE, recursive = TRUE)
-cat("Extracted CSV files:", length(csv_files), "\n")
-if (length(csv_files) > 0) cat("First file:", basename(csv_files[1]), "\n")
-```
-
-```{r inspect-scr}
-# Inspect the structure of the first CSV file
-# Brazilian CSVs typically use semicolons as separators and commas as decimal marks
-if (length(csv_files) > 0) {
-  # Read first few lines to detect format
-  first_lines <- readLines(csv_files[1], n = 3, encoding = "latin1")
-  cat("Header line:\n", first_lines[1], "\n\n")
-
-  # Try reading with semicolon separator (Brazilian standard)
-  scr_sample <- tryCatch(
-    read_csv2(csv_files[1], n_max = 5, locale = locale(encoding = "latin1")) %>%
-      clean_names(),
-    error = function(e) {
-      # Fallback to comma separator
-      read_csv(csv_files[1], n_max = 5, locale = locale(encoding = "latin1")) %>%
-        clean_names()
-    }
-  )
-
-  cat("Column names:\n")
-  cat(paste(names(scr_sample), collapse = ", "), "\n\n")
-  glimpse(scr_sample)
-}
-```
-
-```{r read-scr}
-# Read all SCR CSV files and combine
-# We use a function that tries semicolon first, then comma separator
-read_scr_csv <- function(filepath) {
-  tryCatch({
-    df <- read_csv2(filepath, locale = locale(encoding = "latin1"),
-                    col_types = cols(.default = "c")) %>%
-      clean_names()
-    df
-  }, error = function(e) {
-    tryCatch({
-      read_csv(filepath, locale = locale(encoding = "latin1"),
-               col_types = cols(.default = "c")) %>%
-        clean_names()
-    }, error = function(e2) {
-      cat("Failed to read:", basename(filepath), "\n")
-      tibble()
-    })
-  })
-}
-
-scr_raw <- map_dfr(csv_files, read_scr_csv, .progress = TRUE)
-cat("Total SCR rows:", nrow(scr_raw), "\n")
-cat("Columns:", paste(names(scr_raw), collapse = ", "), "\n")
-```
-
-```{r process-scr}
-# Identify the key columns dynamically
-# Expected columns (after clean_names): data_base, tipo_cliente, carteira_ativa,
-# inadimplencia, ativo_problematico
-scr_cols <- names(scr_raw)
-cat("All SCR columns:\n")
-print(scr_cols)
-
-# Find the date column (contains "data" in name)
-date_col <- scr_cols[str_detect(scr_cols, "data")][1]
-# Find client type column
-client_col <- scr_cols[str_detect(scr_cols, "tipo.*client|client.*tipo")][1]
-# Find carteira ativa column
-portfolio_col <- scr_cols[str_detect(scr_cols, "carteira|portfolio")][1]
-# Find inadimplencia column
-default_col <- scr_cols[str_detect(scr_cols, "inadimp|default")][1]
-# Find ativo problematico column
-problem_col <- scr_cols[str_detect(scr_cols, "ativo.*problem|problem.*asset")][1]
-
-cat("\nDetected column mapping:\n")
-cat("  Date:", date_col, "\n")
-cat("  Client type:", client_col, "\n")
-cat("  Active portfolio:", portfolio_col, "\n")
-cat("  Default rate:", default_col, "\n")
-cat("  Problem assets:", problem_col, "\n")
-```
-
-```{r aggregate-scr}
-# Convert numeric columns (handle Brazilian decimal format: comma -> dot)
-parse_br_number <- function(x) {
-  as.numeric(str_replace_all(x, ",", "."))
-}
-
-# Build the aggregation dataset
-scr_agg <- scr_raw %>%
-  rename(
-    data_base_raw = !!sym(date_col)
-  )
-
-# Conditionally rename columns that were detected
-if (!is.na(client_col)) scr_agg <- scr_agg %>% rename(tipo_cliente = !!sym(client_col))
-if (!is.na(portfolio_col)) scr_agg <- scr_agg %>% rename(carteira_ativa_raw = !!sym(portfolio_col))
-if (!is.na(default_col)) scr_agg <- scr_agg %>% rename(inadimplencia_raw = !!sym(default_col))
-if (!is.na(problem_col)) scr_agg <- scr_agg %>% rename(ativo_problematico_raw = !!sym(problem_col))
-
-# Parse date - try multiple formats
-scr_agg <- scr_agg %>%
+# Merge the three series by date
+scr_total <- df_carteira %>%
+  left_join(df_ativo_prob, by = "date") %>%
+  left_join(df_inadimplencia, by = "date") %>%
   mutate(
-    month = coalesce(
-      ymd(data_base_raw),
-      dmy(data_base_raw),
-      my(data_base_raw),
-      parse_date_time(data_base_raw, orders = c("Ym", "mY", "Ymd", "dmY"))
-    ),
+    month = ymd(paste0(date, "-01")),
     month = ceiling_date(month, "month") - days(1)
-  )
-
-# Parse numeric values
-if ("carteira_ativa_raw" %in% names(scr_agg)) {
-  scr_agg <- scr_agg %>% mutate(carteira_ativa = parse_br_number(carteira_ativa_raw))
-}
-if ("inadimplencia_raw" %in% names(scr_agg)) {
-  scr_agg <- scr_agg %>% mutate(inadimplencia = parse_br_number(inadimplencia_raw))
-}
-if ("ativo_problematico_raw" %in% names(scr_agg)) {
-  scr_agg <- scr_agg %>% mutate(ativo_problematico = parse_br_number(ativo_problematico_raw))
-}
-
-cat("Date range:", as.character(min(scr_agg$month, na.rm = TRUE)),
-    "to", as.character(max(scr_agg$month, na.rm = TRUE)), "\n")
-cat("Rows with valid dates:", sum(!is.na(scr_agg$month)), "\n")
-```
-
-```{r scr-national-totals}
-# Aggregate to national monthly totals — overall and by client type
-
-# National total (all client types)
-scr_total <- scr_agg %>%
-  filter(!is.na(month)) %>%
-  group_by(month) %>%
-  summarise(
-    credit_portfolio = sum(carteira_ativa, na.rm = TRUE),
-    credit_problem = sum(ativo_problematico, na.rm = TRUE),
-    .groups = "drop"
   ) %>%
-  mutate(
-    # Compute weighted default rate from portfolio-level data
-    default_rate = credit_problem / credit_portfolio * 100
-  )
+  select(month, credit_portfolio, problem_asset_rate, default_rate)
 
-cat("National monthly totals:", nrow(scr_total), "months\n")
-
-# By client type (PF = individuals, PJ = firms)
-if ("tipo_cliente" %in% names(scr_agg)) {
-  scr_by_type <- scr_agg %>%
-    filter(!is.na(month), !is.na(tipo_cliente)) %>%
-    mutate(
-      client_type = case_when(
-        str_detect(str_to_upper(tipo_cliente), "PF|PESSOA\\s*F|INDIVIDUAL|PHYSICAL") ~ "PF",
-        str_detect(str_to_upper(tipo_cliente), "PJ|PESSOA\\s*J|CORPORATE|LEGAL|JURIDIC") ~ "PJ",
-        TRUE ~ "Other"
-      )
-    ) %>%
-    filter(client_type %in% c("PF", "PJ")) %>%
-    group_by(month, client_type) %>%
-    summarise(
-      credit_portfolio = sum(carteira_ativa, na.rm = TRUE),
-      credit_problem = sum(ativo_problematico, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    mutate(default_rate = credit_problem / credit_portfolio * 100)
-
-  # Pivot to wide format
-  scr_pf <- scr_by_type %>%
-    filter(client_type == "PF") %>%
-    select(month,
-           credit_pf = credit_portfolio,
-           default_rate_pf = default_rate)
-
-  scr_pj <- scr_by_type %>%
-    filter(client_type == "PJ") %>%
-    select(month,
-           credit_pj = credit_portfolio,
-           default_rate_pj = default_rate)
-
-  cat("PF months:", nrow(scr_pf), " | PJ months:", nrow(scr_pj), "\n")
-}
-
+cat("SCR credit data:", nrow(scr_total), "months\n")
+cat("Date range:", as.character(min(scr_total$month)),
+    "to", as.character(max(scr_total$month)), "\n")
+cat("Credit portfolio range: R$",
+    format(min(scr_total$credit_portfolio), big.mark = ","),
+    "to R$",
+    format(max(scr_total$credit_portfolio), big.mark = ","), "\n")
+cat("Default rate range:",
+    round(min(scr_total$default_rate), 2), "% to",
+    round(max(scr_total$default_rate), 2), "%\n")
 summary(scr_total)
 ```
 
@@ -355,10 +166,6 @@ summary(scr_total)
 # Combine PIX/macro data with SCR credit data
 df_all <- df_merged %>%
   left_join(scr_total, by = "month")
-
-# Add PF/PJ breakdowns if available
-if (exists("scr_pf")) df_all <- df_all %>% left_join(scr_pf, by = "month")
-if (exists("scr_pj")) df_all <- df_all %>% left_join(scr_pj, by = "month")
 
 cat("Combined dataset:", nrow(df_all), "months\n")
 cat("Months with credit data:", sum(!is.na(df_all$credit_portfolio)), "\n")
@@ -400,19 +207,6 @@ df_feat <- df_all %>%
     g_mom_cust = 100 * (ln_cust - lag(ln_cust, 1))
   )
 
-# PF/PJ credit features if available
-if ("credit_pf" %in% names(df_feat)) {
-  df_feat <- df_feat %>%
-    mutate(
-      ln_credit_pf     = ifelse(!is.na(credit_pf) & credit_pf > 0, log(credit_pf), NA_real_),
-      ln_credit_pj     = ifelse(!is.na(credit_pj) & credit_pj > 0, log(credit_pj), NA_real_),
-      g_yoy_credit_pf  = 100 * (ln_credit_pf - lag(ln_credit_pf, 12)),
-      g_yoy_credit_pj  = 100 * (ln_credit_pj - lag(ln_credit_pj, 12)),
-      d_default_pf_yoy = default_rate_pf - lag(default_rate_pf, 12),
-      d_default_pj_yoy = default_rate_pj - lag(default_rate_pj, 12)
-    )
-}
-
 cat("Observations with YoY credit growth:", sum(!is.na(df_feat$g_yoy_credit)), "\n")
 cat("Observations with YoY PIX growth:", sum(!is.na(df_feat$g_yoy_pix)), "\n")
 cat("Observations with customer data:", sum(!is.na(df_feat$ln_cust)), "\n")
@@ -435,23 +229,6 @@ df_feat %>%
   theme_minimal()
 ```
 
-## Credit Portfolio by Client Type
-
-```{r plot-credit-by-type, eval="credit_pf" %in% names(df_feat)}
-df_feat %>%
-  filter(!is.na(credit_pf)) %>%
-  select(month, Individuals = credit_pf, Firms = credit_pj) %>%
-  pivot_longer(-month, names_to = "Client Type", values_to = "portfolio") %>%
-  ggplot(aes(month, portfolio / 1e9, color = `Client Type`)) +
-  geom_line(linewidth = 1) +
-  scale_y_continuous(labels = comma) +
-  scale_color_manual(values = c("Individuals" = "steelblue", "Firms" = "darkorange")) +
-  labs(title = "Active Credit Portfolio by Client Type",
-       subtitle = "R$ billions",
-       x = NULL, y = "Credit Portfolio (R$ Bn)") +
-  theme_minimal()
-```
-
 ## Default Rates
 
 ```{r plot-default-rate}
@@ -461,19 +238,6 @@ df_feat %>%
   geom_line(color = "firebrick", linewidth = 1) +
   labs(title = "Credit Default Rate (Inadimplência)",
        subtitle = "Share of portfolio with installments overdue > 90 days",
-       x = NULL, y = "Default Rate (%)") +
-  theme_minimal()
-```
-
-```{r plot-default-by-type, eval="default_rate_pf" %in% names(df_feat)}
-df_feat %>%
-  filter(!is.na(default_rate_pf)) %>%
-  select(month, Individuals = default_rate_pf, Firms = default_rate_pj) %>%
-  pivot_longer(-month, names_to = "Client Type", values_to = "rate") %>%
-  ggplot(aes(month, rate, color = `Client Type`)) +
-  geom_line(linewidth = 1) +
-  scale_color_manual(values = c("Individuals" = "steelblue", "Firms" = "darkorange")) +
-  labs(title = "Default Rate by Client Type",
        x = NULL, y = "Default Rate (%)") +
   theme_minimal()
 ```
@@ -597,13 +361,9 @@ if (nrow(cor_vars) >= 3) {
 
 # Regression Framework
 
-We estimate time-series OLS regressions with **Newey–West (HAC) standard errors** to address autocorrelation and heteroskedasticity. The analysis proceeds in three parts:
+We estimate time-series OLS regressions with **Newey–West (HAC) standard errors** to address autocorrelation and heteroskedasticity. The analysis proceeds in two parts:
 
-## Part A — PIX Growth Models (Existing Analysis)
-
-Replicates the baseline analysis: does PIX transaction growth respond to macro conditions and Open Finance adoption?
-
-## Part B — Credit Growth Models (New)
+## Part A — Credit Growth Models
 
 Tests whether Open Finance adoption is associated with **credit expansion**, controlling for macro conditions:
 
@@ -623,7 +383,7 @@ $$
 
 - $\beta_3 > 0$: Open Finance adoption is associated with faster credit growth.
 
-## Part C — Default Rate Models (New)
+## Part B — Default Rate Models
 
 Tests whether Open Finance adoption is associated with **improved credit quality**:
 
@@ -643,51 +403,7 @@ $$
 
 - $\beta_3 < 0$: Open Finance adoption is associated with declining default rates (better credit quality).
 
-# Part A: PIX Growth Models
-
-## Baseline: PIX Growth ~ Selic + IBC-Br Growth
-
-```{r pix-baseline}
-df_m_pix <- df_feat %>%
-  select(month, g_yoy_pix, selic, g_yoy_ibc_br) %>%
-  drop_na()
-
-cat("PIX baseline sample:", nrow(df_m_pix), "months\n")
-cat("Range:", as.character(min(df_m_pix$month)),
-    "to", as.character(max(df_m_pix$month)), "\n")
-
-m_pix_base <- lm(g_yoy_pix ~ selic + g_yoy_ibc_br, data = df_m_pix)
-nw_lag <- max(1, floor(0.75 * nrow(df_m_pix)^(1/3)))
-nw_pix_base <- NeweyWest(m_pix_base, lag = nw_lag, prewhite = FALSE)
-
-cat("\n--- PIX YoY Growth ~ Selic + IBC-Br Growth ---\n")
-coeftest(m_pix_base, vcov = nw_pix_base)
-cat("\nR-squared:", round(summary(m_pix_base)$r.squared, 4), "\n")
-```
-
-## Extended: PIX Growth ~ Selic + IBC-Br + ln(Customers)
-
-```{r pix-extended}
-df_m_pix_ext <- df_feat %>%
-  select(month, g_yoy_pix, selic, g_yoy_ibc_br, ln_cust) %>%
-  drop_na()
-
-cat("PIX extended sample:", nrow(df_m_pix_ext), "months\n")
-
-if (nrow(df_m_pix_ext) >= 5) {
-  m_pix_ext <- lm(g_yoy_pix ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pix_ext)
-  nw_lag_ext <- max(1, floor(0.75 * nrow(df_m_pix_ext)^(1/3)))
-  nw_pix_ext <- NeweyWest(m_pix_ext, lag = nw_lag_ext, prewhite = FALSE)
-
-  cat("\n--- PIX YoY Growth ~ Selic + IBC-Br Growth + ln(Customers) ---\n")
-  coeftest(m_pix_ext, vcov = nw_pix_ext)
-  cat("\nR-squared:", round(summary(m_pix_ext)$r.squared, 4), "\n")
-} else {
-  cat("Insufficient observations for extended PIX model.\n")
-}
-```
-
-# Part B: Credit Growth Models
+# Part A: Credit Growth Models
 
 ## Baseline: Credit Growth ~ Selic + IBC-Br Growth
 
@@ -737,45 +453,7 @@ if (nrow(df_m_cred_ext) >= 5) {
 }
 ```
 
-## Credit Growth by Client Type
-
-```{r credit-by-type, eval="g_yoy_credit_pf" %in% names(df_feat)}
-# PF (Individuals)
-df_m_pf <- df_feat %>%
-  select(month, g_yoy_credit_pf, selic, g_yoy_ibc_br, ln_cust) %>%
-  drop_na()
-
-cat("PF credit extended sample:", nrow(df_m_pf), "months\n")
-
-if (nrow(df_m_pf) >= 5) {
-  m_pf <- lm(g_yoy_credit_pf ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pf)
-  nw_pf <- NeweyWest(m_pf, lag = max(1, floor(0.75 * nrow(df_m_pf)^(1/3))),
-                     prewhite = FALSE)
-
-  cat("\n--- PF Credit YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n")
-  coeftest(m_pf, vcov = nw_pf)
-  cat("\nR-squared:", round(summary(m_pf)$r.squared, 4), "\n")
-}
-
-# PJ (Firms)
-df_m_pj <- df_feat %>%
-  select(month, g_yoy_credit_pj, selic, g_yoy_ibc_br, ln_cust) %>%
-  drop_na()
-
-cat("\nPJ credit extended sample:", nrow(df_m_pj), "months\n")
-
-if (nrow(df_m_pj) >= 5) {
-  m_pj <- lm(g_yoy_credit_pj ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_pj)
-  nw_pj <- NeweyWest(m_pj, lag = max(1, floor(0.75 * nrow(df_m_pj)^(1/3))),
-                     prewhite = FALSE)
-
-  cat("\n--- PJ Credit YoY Growth ~ Selic + IBC-Br + ln(Customers) ---\n")
-  coeftest(m_pj, vcov = nw_pj)
-  cat("\nR-squared:", round(summary(m_pj)$r.squared, 4), "\n")
-}
-```
-
-# Part C: Default Rate Models
+# Part B: Default Rate Models
 
 ## Baseline: Default Rate Change ~ Selic + IBC-Br Growth
 
@@ -822,44 +500,6 @@ if (nrow(df_m_def_ext) >= 5) {
 }
 ```
 
-## Default Rate by Client Type
-
-```{r default-by-type, eval="d_default_pf_yoy" %in% names(df_feat)}
-# PF
-df_m_def_pf <- df_feat %>%
-  select(month, d_default_pf_yoy, selic, g_yoy_ibc_br, ln_cust) %>%
-  drop_na()
-
-if (nrow(df_m_def_pf) >= 5) {
-  m_def_pf <- lm(d_default_pf_yoy ~ selic + g_yoy_ibc_br + ln_cust,
-                 data = df_m_def_pf)
-  nw_def_pf <- NeweyWest(m_def_pf,
-                         lag = max(1, floor(0.75 * nrow(df_m_def_pf)^(1/3))),
-                         prewhite = FALSE)
-
-  cat("--- YoY Change in PF Default Rate ~ Selic + IBC-Br + ln(Customers) ---\n")
-  coeftest(m_def_pf, vcov = nw_def_pf)
-  cat("\nR-squared:", round(summary(m_def_pf)$r.squared, 4), "\n")
-}
-
-# PJ
-df_m_def_pj <- df_feat %>%
-  select(month, d_default_pj_yoy, selic, g_yoy_ibc_br, ln_cust) %>%
-  drop_na()
-
-if (nrow(df_m_def_pj) >= 5) {
-  m_def_pj <- lm(d_default_pj_yoy ~ selic + g_yoy_ibc_br + ln_cust,
-                 data = df_m_def_pj)
-  nw_def_pj <- NeweyWest(m_def_pj,
-                         lag = max(1, floor(0.75 * nrow(df_m_def_pj)^(1/3))),
-                         prewhite = FALSE)
-
-  cat("\n--- YoY Change in PJ Default Rate ~ Selic + IBC-Br + ln(Customers) ---\n")
-  coeftest(m_def_pj, vcov = nw_def_pj)
-  cat("\nR-squared:", round(summary(m_def_pj)$r.squared, 4), "\n")
-}
-```
-
 # Alternative Specification: Month-over-Month Growth
 
 For robustness, we also estimate credit models using MoM growth rates.
@@ -903,37 +543,6 @@ if (nrow(df_mom_cred_ext) >= 5) {
 }
 ```
 
-```{r pix-mom}
-# MoM PIX models (from original analysis)
-df_mom_pix <- df_feat %>%
-  select(month, g_mom_pix, selic, g_mom_ibc_br) %>%
-  drop_na()
-
-m_mom_pix <- lm(g_mom_pix ~ selic + g_mom_ibc_br, data = df_mom_pix)
-nw_mom_pix <- NeweyWest(m_mom_pix,
-                        lag = max(1, floor(0.75 * nrow(df_mom_pix)^(1/3))),
-                        prewhite = FALSE)
-
-cat("--- PIX MoM Growth ~ Selic + IBC-Br MoM ---\n")
-coeftest(m_mom_pix, vcov = nw_mom_pix)
-
-# Extended
-df_mom_pix_ext <- df_feat %>%
-  select(month, g_mom_pix, selic, g_mom_ibc_br, ln_cust) %>%
-  drop_na()
-
-if (nrow(df_mom_pix_ext) >= 5) {
-  m_mom_pix_ext <- lm(g_mom_pix ~ selic + g_mom_ibc_br + ln_cust,
-                      data = df_mom_pix_ext)
-  nw_mom_pix_ext <- NeweyWest(m_mom_pix_ext,
-                              lag = max(1, floor(0.75 * nrow(df_mom_pix_ext)^(1/3))),
-                              prewhite = FALSE)
-
-  cat("\n--- PIX MoM Growth ~ Selic + IBC-Br MoM + ln(Customers) ---\n")
-  coeftest(m_mom_pix_ext, vcov = nw_mom_pix_ext)
-}
-```
-
 # Summary of Results
 
 ```{r summary-table}
@@ -954,17 +563,7 @@ extract_results <- function(model, nw_vcov, label) {
 # Collect all estimated models
 results_list <- list()
 
-# PIX models (always available)
-results_list[["PIX Base (YoY)"]] <- extract_results(m_pix_base, nw_pix_base, "PIX Base (YoY)")
-if (exists("m_pix_ext")) {
-  results_list[["PIX + OF (YoY)"]] <- extract_results(m_pix_ext, nw_pix_ext, "PIX + OF (YoY)")
-}
-results_list[["PIX Base (MoM)"]] <- extract_results(m_mom_pix, nw_mom_pix, "PIX Base (MoM)")
-if (exists("m_mom_pix_ext")) {
-  results_list[["PIX + OF (MoM)"]] <- extract_results(m_mom_pix_ext, nw_mom_pix_ext, "PIX + OF (MoM)")
-}
-
-# Credit models
+# Credit growth models
 if (exists("m_cred_base")) {
   results_list[["Credit Base (YoY)"]] <- extract_results(m_cred_base, nw_cred_base, "Credit Base (YoY)")
 }
@@ -986,25 +585,11 @@ if (exists("m_def_ext")) {
   results_list[["Default + OF (YoY)"]] <- extract_results(m_def_ext, nw_def_ext, "Default + OF (YoY)")
 }
 
-# PF/PJ models
-if (exists("m_pf")) {
-  results_list[["Credit PF + OF"]] <- extract_results(m_pf, nw_pf, "Credit PF + OF")
-}
-if (exists("m_pj")) {
-  results_list[["Credit PJ + OF"]] <- extract_results(m_pj, nw_pj, "Credit PJ + OF")
-}
-if (exists("m_def_pf")) {
-  results_list[["Default PF + OF"]] <- extract_results(m_def_pf, nw_def_pf, "Default PF + OF")
-}
-if (exists("m_def_pj")) {
-  results_list[["Default PJ + OF"]] <- extract_results(m_def_pj, nw_def_pj, "Default PJ + OF")
-}
-
 results <- bind_rows(results_list)
 
 results %>%
   mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
-  knitr::kable(caption = "Full Regression Results Summary — Impact of Open Finance on Credit")
+  knitr::kable(caption = "Regression Results Summary — Impact of Open Finance on Credit")
 ```
 
 # Interpretation
@@ -1026,17 +611,7 @@ The default rate model tests whether Open Finance adoption is associated with de
 Key considerations:
 
 - Declining default rates during a period of Open Finance expansion could reflect improved risk assessment (causal) or simply economic recovery reducing distress (confounding).
-- The PF (individual) vs. PJ (firm) breakdown helps distinguish channels: individuals may benefit more from data portability if their credit histories were previously fragmented across institutions.
-
-## PF vs. PJ Differential Effects
-
-Open Finance is expected to have a stronger impact on **individual (PF) credit** because:
-
-1. Individuals are more likely to have fragmented financial relationships across multiple institutions.
-2. Data portability enables "thin-file" borrowers to demonstrate creditworthiness using transaction history.
-3. Firms already have established credit relationships and more standardized financial reporting.
-
-A larger positive $\hat{\beta}_3$ for PF credit growth (or a more negative $\hat{\beta}_3$ for PF default rates) relative to PJ would be consistent with this channel.
+- The national aggregate masks heterogeneity — individuals may benefit more from data portability if their credit histories were previously fragmented across institutions.
 
 # Caveats and Limitations
 
@@ -1066,13 +641,13 @@ A larger positive $\hat{\beta}_3$ for PF credit growth (or a more negative $\hat
 | `lmtest` | Coefficient testing with robust SEs |
 | `broom` | Tidy model output |
 | `zoo` | Time-series utilities |
-| `janitor` | Column name cleaning |
 | `gridExtra` | Arranging multiple plots |
 
 # Data Sources
 
-| Source | Description | URL |
-|--------|-------------|-----|
-| SCR.Data | Monthly credit aggregates from BCB | `https://www.bcb.gov.br/pda/desig/scrdata_{YEAR}.zip` |
-| SCR.Data Methodology | Full methodology documentation | `https://www.bcb.gov.br/content/estabilidadefinanceira/scr/scr.data/scr_data_metodologia.pdf` |
-| Open Data Portal | BCB open data | `https://dadosabertos.bcb.gov.br/dataset/scr_data` |
+| Source | Description | Location |
+|--------|-------------|----------|
+| SCR.Data — Carteira Ativa | Active credit portfolio (R$) | `data/carteira.csv` |
+| SCR.Data — Ativo Problemático | Problem asset rate (%) | `data/ativo-problemtico.csv` |
+| SCR.Data — Inadimplência | Default rate (%) | `data/inadimplncia.csv` |
+| PIX / Macro / Customers | PIX volumes, Selic, IBC-Br, OF customers | `data/data_monthly.xlsx` |
