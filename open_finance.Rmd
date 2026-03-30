@@ -9,11 +9,14 @@ output:
     toc_depth: 3
     number_sections: true
     theme: readable
+  word_document:
+    toc: true
+    number_sections: true
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
-  echo = TRUE,
+  echo = FALSE,
   message = FALSE,
   warning = FALSE,
   fig.width = 9,
