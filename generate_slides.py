@@ -1,8 +1,10 @@
 """
-Generate 4 presentation-ready graphs for a 3-slide executive summary:
+Generate presentation-ready graphs for an executive summary:
   Slide 1: OF Customers vs Credit Portfolio (dual-axis) + Default Rate
-  Slide 2: Coefficient plot — Credit Growth on ln(Customers)
+  Slide 2: Coefficient plot — Credit Growth (stock) on ln(Customers)
   Slide 3: Coefficient plot — Default Rate Change on ln(Customers)
+  Slide 4: Coefficient plot — Credit Origination Growth on ln(Customers)
+  Slide 5: Coefficient plot — SME Credit & Interest Rates on ln(Customers)
 
 Outputs saved to slides/ as high-res PNGs.
 """
@@ -98,6 +100,44 @@ df = (
       .reset_index(drop=True)
 )
 
+# ── Load BCB SGS data (originations, SME, rates) ────────────────────────
+
+def load_sgs_csv(filepath, colname):
+    """Load a BCB SGS CSV (semicolon-sep, DD/MM/YYYY dates, comma decimals)."""
+    try:
+        raw = pd.read_csv(filepath, sep=";", encoding="utf-8")
+        raw.columns = ["date_str", "value"]
+        raw["month"] = pd.to_datetime(raw["date_str"], format="%d/%m/%Y") + pd.offsets.MonthEnd(0)
+        raw[colname] = raw["value"].astype(str).str.replace(",", ".").astype(float)
+        return raw[["month", colname]]
+    except Exception as e:
+        print(f"  Could not load {filepath}: {e}")
+        return None
+
+sgs_files = {
+    "orig_total":          "data/concessoes_total.csv",
+    "orig_pf_personal_nc": "data/concessoes_pf_pessoal_nao_consig.csv",
+    "orig_pj_total":       "data/concessoes_pj_total.csv",
+    "orig_pj_working_cap": "data/concessoes_pj_capital_giro.csv",
+    "credit_mpme":         "data/credito_mpme.csv",
+    "rate_pf_personal_nc": "data/taxa_juros_pf_pessoal_nao_consig.csv",
+    "rate_pj_small":       "data/taxa_juros_pj_pequeno_porte.csv",
+}
+
+for colname, fpath in sgs_files.items():
+    sgs_df = load_sgs_csv(fpath, colname)
+    if sgs_df is not None:
+        df = df.merge(sgs_df, on="month", how="left")
+        print(f"  Loaded {colname} ({len(sgs_df)} rows)")
+
+# ── Load OF API call data ────────────────────────────────────────────────
+api_path = Path("data/of_api_monthly.csv")
+if api_path.exists():
+    of_api = pd.read_csv(api_path)
+    of_api["month"] = pd.to_datetime(of_api["month"]) + pd.offsets.MonthEnd(0)
+    df = df.merge(of_api, on="month", how="left")
+    print(f"  Loaded OF API data ({len(of_api)} months)")
+
 # ── Features ──────────────────────────────────────────────────────────────
 
 def safe_log(s):
@@ -119,6 +159,27 @@ df["g_yoy_ibc_br"]      = 100 * (df["ln_ibc_br"] - df["ln_ibc_br"].shift(12))
 df["d_default_yoy"]    = df["default_rate"] - df["default_rate"].shift(12)
 df["d_default_pf_yoy"] = df["default_rate_pf"] - df["default_rate_pf"].shift(12)
 df["d_default_pj_yoy"] = df["default_rate_pj"] - df["default_rate_pj"].shift(12)
+
+# Origination growth rates
+for col in ["orig_total", "orig_pf_personal_nc", "orig_pj_total", "orig_pj_working_cap"]:
+    if col in df.columns:
+        ln_col = f"ln_{col}"
+        df[ln_col] = safe_log(df[col])
+        df[f"g_yoy_{col}"] = 100 * (df[ln_col] - df[ln_col].shift(12))
+
+# SME credit growth
+if "credit_mpme" in df.columns:
+    df["ln_credit_mpme"] = safe_log(df["credit_mpme"])
+    df["g_yoy_credit_mpme"] = 100 * (df["ln_credit_mpme"] - df["ln_credit_mpme"].shift(12))
+
+# Interest rate YoY changes
+for col in ["rate_pf_personal_nc", "rate_pj_small"]:
+    if col in df.columns:
+        df[f"d_{col}_yoy"] = df[col] - df[col].shift(12)
+
+# API call treatment variable
+if "api_credit" in df.columns:
+    df["ln_api_credit"] = safe_log(df["api_credit"])
 
 
 # ── Regression helper ─────────────────────────────────────────────────────
@@ -337,4 +398,165 @@ coef_plot(
     positive_good=False,
 )
 
-print("\nAll 4 graphs saved to slides/")
+# ══════════════════════════════════════════════════════════════════════════
+# SLIDE 4 — Coefficient Plot: Credit Origination Growth (Flow-Based)
+# ══════════════════════════════════════════════════════════════════════════
+
+orig_models = {}
+orig_spec = {
+    "Total\nOriginations":      "g_yoy_orig_total",
+    "PF Personal\n(Non-Payroll)": "g_yoy_orig_pf_personal_nc",
+    "PJ Total\nOriginations":   "g_yoy_orig_pj_total",
+    "PJ Working\nCapital":      "g_yoy_orig_pj_working_cap",
+}
+
+for label, y_col in orig_spec.items():
+    if y_col in df.columns and df[y_col].notna().sum() >= 10:
+        try:
+            res = run_ols_nw(y_col, controls + ["ln_cust"], df)
+            orig_models[label] = {
+                "beta": res["params"]["ln_cust"],
+                "se":   res["bse"]["ln_cust"],
+                "p":    res["pvalues"]["ln_cust"],
+                "n":    res["nobs"],
+                "r2":   res["r2"],
+            }
+        except Exception as e:
+            print(f"  Skipping {label}: {e}")
+
+if orig_models:
+    coef_plot(
+        orig_models,
+        title="Effect of Open Finance on Credit Origination Growth (YoY)",
+        xlabel="Coefficient on ln(Customers)",
+        filename="slide4_origination_coefs.png",
+        positive_good=True,
+    )
+else:
+    print("Skipped slide 4 (no origination data). Run download_bcb_data.R first.")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# SLIDE 5 — Coefficient Plot: SME Credit & Interest Rate Models
+# ══════════════════════════════════════════════════════════════════════════
+
+inclusion_models = {}
+
+# SME credit growth
+if "g_yoy_credit_mpme" in df.columns and df["g_yoy_credit_mpme"].notna().sum() >= 10:
+    try:
+        res = run_ols_nw("g_yoy_credit_mpme", controls + ["ln_cust"], df)
+        inclusion_models["SME Credit\nGrowth (YoY)"] = {
+            "beta": res["params"]["ln_cust"],
+            "se":   res["bse"]["ln_cust"],
+            "p":    res["pvalues"]["ln_cust"],
+            "n":    res["nobs"],
+            "r2":   res["r2"],
+        }
+    except Exception as e:
+        print(f"  Skipping SME model: {e}")
+
+# Interest rate changes
+rate_spec = {
+    "PF Personal Rate\nChange (YoY pp)": "d_rate_pf_personal_nc_yoy",
+    "PJ Small Biz Rate\nChange (YoY pp)": "d_rate_pj_small_yoy",
+}
+
+for label, y_col in rate_spec.items():
+    if y_col in df.columns and df[y_col].notna().sum() >= 10:
+        try:
+            res = run_ols_nw(y_col, controls + ["ln_cust"], df)
+            inclusion_models[label] = {
+                "beta": res["params"]["ln_cust"],
+                "se":   res["bse"]["ln_cust"],
+                "p":    res["pvalues"]["ln_cust"],
+                "n":    res["nobs"],
+                "r2":   res["r2"],
+            }
+        except Exception as e:
+            print(f"  Skipping {label}: {e}")
+
+if inclusion_models:
+    coef_plot(
+        inclusion_models,
+        title="Effect of Open Finance on SME Credit & Interest Rates",
+        xlabel="Coefficient on ln(Customers)",
+        filename="slide5_sme_rates_coefs.png",
+        positive_good=True,  # For SME growth positive is good; for rates negative is good
+    )
+else:
+    print("Skipped slide 5 (no SME/rate data). Run download_bcb_data.R first.")
+
+# ══════════════════════════════════════════════════════════════════════════
+# SLIDE 6 — API Calls Time Series (Credit vs Other)
+# ══════════════════════════════════════════════════════════════════════════
+
+has_api_slide = False
+if "api_credit" in df.columns:
+    api_mask = df["api_total"].notna()
+    if api_mask.sum() > 5:
+        fig, ax = plt.subplots(figsize=(11, 5.5))
+
+        other = df.loc[api_mask, "api_total"] - df.loc[api_mask, "api_credit"]
+        ax.fill_between(df.loc[api_mask, "month"], 0, other / 1e3,
+                        alpha=0.4, color=GREY, label="Other APIs")
+        ax.fill_between(df.loc[api_mask, "month"], other / 1e3,
+                        (other + df.loc[api_mask, "api_credit"]) / 1e3,
+                        alpha=0.7, color=BLUE, label="Credit-Related APIs")
+
+        ax.set_title("Open Finance API Calls by Category (Monthly)", pad=12)
+        ax.set_ylabel("API Calls (thousands)")
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f"{x:,.0f}"))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
+        ax.legend(loc="upper left")
+
+        fig.tight_layout()
+        fig.savefig(OUT / "slide6_api_calls_timeseries.png", dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print("Saved slide6_api_calls_timeseries.png")
+        has_api_slide = True
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# SLIDE 7 — Coefficient Plot: API Credit Calls as Treatment Variable
+# ══════════════════════════════════════════════════════════════════════════
+
+has_api_coef_slide = False
+if "ln_api_credit" in df.columns:
+    api_models = {}
+    api_spec = {
+        "Total Credit\nGrowth (YoY)":    ("g_yoy_credit",      controls + ["ln_api_credit"]),
+        "PF Personal\nLoans (YoY)":      ("g_yoy_pf_personal", controls + ["ln_api_credit"]),
+        "Default Rate\nChange (YoY)":    ("d_default_yoy",     controls + ["ln_api_credit"]),
+    }
+
+    for label, (y_col, x_cols) in api_spec.items():
+        if y_col in df.columns and df[y_col].notna().sum() >= 10:
+            try:
+                res = run_ols_nw(y_col, x_cols, df)
+                api_models[label] = {
+                    "beta": res["params"]["ln_api_credit"],
+                    "se":   res["bse"]["ln_api_credit"],
+                    "p":    res["pvalues"]["ln_api_credit"],
+                    "n":    res["nobs"],
+                    "r2":   res["r2"],
+                }
+            except Exception as e:
+                print(f"  Skipping API model {label}: {e}")
+
+    if api_models:
+        coef_plot(
+            api_models,
+            title="Effect of OF Credit API Calls on Credit Outcomes",
+            xlabel="Coefficient on ln(API Credit Calls)",
+            filename="slide7_api_credit_coefs.png",
+            positive_good=True,
+        )
+        has_api_coef_slide = True
+    else:
+        print("Skipped slide 7 (insufficient API data for regressions)")
+
+n_slides = (4 + (1 if orig_models else 0) + (1 if inclusion_models else 0)
+            + (1 if has_api_slide else 0) + (1 if has_api_coef_slide else 0))
+print(f"\nAll {n_slides} graphs saved to slides/")

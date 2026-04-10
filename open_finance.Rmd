@@ -39,16 +39,20 @@ library(lmtest)
 
 # Objective
 
-This notebook examines the **impact of Open Finance on credit in Brazil** by combining three data sources:
+This notebook examines the **impact of Open Finance on credit in Brazil**, with a focus on **financial inclusion**, by combining multiple data sources:
 
-1. **SCR.Data** (Sistema de Informações de Crédito) — monthly aggregated credit data published by the Central Bank of Brazil (BCB), including active credit portfolios and default rates.
-2. **PIX transaction volumes** — Brazil's instant payment system, a core pillar of Open Finance infrastructure.
-3. **Open Finance customer counts** — the number of customers with active data-sharing consents.
+1. **SCR.Data** (Sistema de Informações de Crédito) — monthly aggregated credit data published by the Central Bank of Brazil (BCB), including active credit portfolios, default rates, and credit originations (flows).
+2. **BCB SGS** (Sistema Gerenciador de Séries Temporais) — credit originations by modality, SME credit stock, and average interest rates/tenors.
+3. **PIX transaction volumes** — Brazil's instant payment system, a core pillar of Open Finance infrastructure.
+4. **Open Finance customer counts** — the number of customers with active data-sharing consents.
 
 We investigate whether the expansion of Open Finance is associated with:
 
-- **Credit growth** — larger active credit portfolios, controlling for macro conditions.
+- **Credit origination growth** — higher flow of new lending (prioritized over stock measures for financial inclusion).
+- **SME credit expansion** — credit access for micro, small, and medium enterprises (MPMe).
+- **Consumer credit growth** — especially unsecured personal loans where information asymmetry is highest.
 - **Lower default rates** — improved credit quality as information-sharing reduces adverse selection.
+- **Changes in lending conditions** — whether interest rates decline as Open Finance increases competition.
 - **Differential effects by client type** — whether individuals (PF) and firms (PJ) are affected differently.
 
 # Background
@@ -89,7 +93,7 @@ From `data/data_monthly.xlsx`:
 - **Sheet 1**: PIX, Customers, Selic, IBC-Br (January 2023 – January 2025)
 - **Sheet 2**: PIX, Selic, IBC-Br (November 2020 – December 2024)
 
-## SCR.Data — Credit Variables
+## SCR.Data — Credit Stock Variables
 
 Monthly national aggregates from BCB's SCR.Data portal, stored locally as CSV files:
 
@@ -98,6 +102,29 @@ Monthly national aggregates from BCB's SCR.Data portal, stored locally as CSV fi
 - `inadimplncia.csv` — Default rate (%)
 
 Data covers June 2012 to June 2025 (national totals, all client types).
+
+## BCB SGS — Credit Originations, SME Credit, and Interest Rates
+
+Monthly time series from BCB's SGS system, downloaded via `download_bcb_data.R`:
+
+**Credit Originations (Concessões)** — flow-based measures of new lending:
+
+- `concessoes_total.csv` — Total credit originations (Series 20631)
+- `concessoes_pf_pessoal_total.csv` — PF personal credit total (Series 20672)
+- `concessoes_pf_pessoal_nao_consig.csv` — PF personal non-payroll (Series 20666)
+- `concessoes_pf_cartao.csv` — PF credit card originations (Series 20656)
+- `concessoes_pj_total.csv` — PJ total originations (Series 20635)
+- `concessoes_pj_capital_giro.csv` — PJ working capital (Series 20642)
+
+**SME Credit Stock:**
+
+- `credito_mpme.csv` — Credit balance for Micro, Small & Medium enterprises (Series 27701)
+
+**Interest Rates:**
+
+- `taxa_juros_pf_total.csv` — Average interest rate, PF total (Series 20716)
+- `taxa_juros_pf_pessoal_nao_consig.csv` — Average monthly rate, PF personal non-payroll (Series 25464)
+- `taxa_juros_pj_pequeno_porte.csv` — Average rate, PJ small businesses (Series 26429)
 
 # Load Existing Data (PIX, Customers, Macro)
 
@@ -222,14 +249,123 @@ cat("  Housing:        ", round(latest$credit_pf_housing / 1e9, 1), "\n")
 cat("  Vehicles:       ", round(latest$credit_pf_vehicles / 1e9, 1), "\n")
 ```
 
+## Credit Originations (BCB SGS)
+
+```{r load-originations}
+# BCB SGS CSV format: semicolon-separated, DD/MM/YYYY dates, comma as decimal separator
+# Run download_bcb_data.R first to download these files from the BCB API
+
+load_sgs <- function(filepath, varname) {
+  if (!file.exists(filepath)) {
+    cat("  MISSING:", filepath, "— run download_bcb_data.R to fetch\n")
+    return(NULL)
+  }
+  df <- read_csv2(filepath, show_col_types = FALSE)
+  names(df) <- c("date_str", "value")
+  df %>%
+    mutate(
+      month = dmy(date_str),
+      month = ceiling_date(month, "month") - days(1),
+      !!varname := as.numeric(gsub(",", ".", value))
+    ) %>%
+    select(month, all_of(varname))
+}
+
+orig_total    <- load_sgs("data/concessoes_total.csv", "orig_total")
+orig_pf_pers  <- load_sgs("data/concessoes_pf_pessoal_total.csv", "orig_pf_personal")
+orig_pf_nc    <- load_sgs("data/concessoes_pf_pessoal_nao_consig.csv", "orig_pf_personal_nc")
+orig_pf_card  <- load_sgs("data/concessoes_pf_cartao.csv", "orig_pf_card")
+orig_pj_total <- load_sgs("data/concessoes_pj_total.csv", "orig_pj_total")
+orig_pj_giro  <- load_sgs("data/concessoes_pj_capital_giro.csv", "orig_pj_working_cap")
+
+# Merge all origination series
+orig_list <- list(orig_total, orig_pf_pers, orig_pf_nc, orig_pf_card,
+                  orig_pj_total, orig_pj_giro)
+orig_list <- orig_list[!sapply(orig_list, is.null)]
+
+if (length(orig_list) > 0) {
+  scr_orig <- reduce(orig_list, left_join, by = "month")
+  cat("Credit originations:", nrow(scr_orig), "months\n")
+  cat("Date range:", as.character(min(scr_orig$month)),
+      "to", as.character(max(scr_orig$month)), "\n")
+} else {
+  scr_orig <- tibble(month = as.Date(character()))
+  cat("No origination data available. Run download_bcb_data.R first.\n")
+}
+```
+
+## SME Credit Stock (BCB SGS)
+
+```{r load-sme}
+sme_credit <- load_sgs("data/credito_mpme.csv", "credit_mpme")
+
+if (!is.null(sme_credit)) {
+  cat("SME credit stock:", nrow(sme_credit), "months\n")
+  cat("Date range:", as.character(min(sme_credit$month)),
+      "to", as.character(max(sme_credit$month)), "\n")
+} else {
+  sme_credit <- tibble(month = as.Date(character()))
+  cat("No SME data available. Run download_bcb_data.R first.\n")
+}
+```
+
+## Interest Rates (BCB SGS)
+
+```{r load-rates}
+rate_pf_total <- load_sgs("data/taxa_juros_pf_total.csv", "rate_pf_total")
+rate_pf_pers  <- load_sgs("data/taxa_juros_pf_pessoal_nao_consig.csv", "rate_pf_personal_nc")
+rate_pj_small <- load_sgs("data/taxa_juros_pj_pequeno_porte.csv", "rate_pj_small")
+
+rate_list <- list(rate_pf_total, rate_pf_pers, rate_pj_small)
+rate_list <- rate_list[!sapply(rate_list, is.null)]
+
+if (length(rate_list) > 0) {
+  scr_rates <- reduce(rate_list, left_join, by = "month")
+  cat("Interest rate data:", nrow(scr_rates), "months\n")
+  cat("Date range:", as.character(min(scr_rates$month)),
+      "to", as.character(max(scr_rates$month)), "\n")
+} else {
+  scr_rates <- tibble(month = as.Date(character()))
+  cat("No interest rate data available. Run download_bcb_data.R first.\n")
+}
+```
+
+## Open Finance API Calls by Category
+
+```{r load-api-calls}
+# Monthly API call data by category, produced by process_api_data.py
+# from 14 OF Dashboard Excel exports
+api_path <- "data/of_api_monthly.csv"
+
+if (file.exists(api_path)) {
+  of_api <- read_csv(api_path, show_col_types = FALSE) %>%
+    mutate(month = as.Date(month))
+  cat("OF API call data:", nrow(of_api), "months\n")
+  cat("Date range:", as.character(min(of_api$month)),
+      "to", as.character(max(of_api$month)), "\n")
+  cat("Credit-related API calls (latest month):",
+      format(tail(of_api$api_credit, 1), big.mark = ","), "\n")
+} else {
+  of_api <- tibble(month = as.Date(character()))
+  cat("No API call data available. Run process_api_data.py first.\n")
+}
+```
+
 # Merge All Data
 
 ```{r merge-all}
 # Combine PIX/macro data with SCR credit data (total + PF/PJ + PF modalities)
+# plus originations, SME credit, and interest rates
 df_all <- df_merged %>%
   left_join(scr_total, by = "month") %>%
   left_join(scr_pf_pj, by = "month") %>%
   left_join(scr_pf_mod, by = "month")
+
+# Add new data sources if available
+if (nrow(scr_orig) > 0) df_all <- df_all %>% left_join(scr_orig, by = "month")
+if (nrow(sme_credit) > 0) df_all <- df_all %>% left_join(sme_credit, by = "month")
+if (nrow(scr_rates) > 0) df_all <- df_all %>% left_join(scr_rates, by = "month")
+if (nrow(of_api) > 0) df_all <- df_all %>% left_join(of_api, by = "month")
 
 cat("Combined dataset:", nrow(df_all), "months\n")
 cat("Months with credit data:", sum(!is.na(df_all$credit_portfolio)), "\n")
@@ -284,6 +420,74 @@ df_feat <- df_all %>%
 cat("Observations with YoY credit growth:", sum(!is.na(df_feat$g_yoy_credit)), "\n")
 cat("Observations with YoY PF credit growth:", sum(!is.na(df_feat$g_yoy_credit_pf)), "\n")
 cat("Observations with customer data:", sum(!is.na(df_feat$ln_cust)), "\n")
+```
+
+## New Variables: Credit Originations, SME Credit, Interest Rates
+
+```{r features-new}
+# Credit origination YoY growth rates (flow-based measures)
+orig_vars <- c("orig_total", "orig_pf_personal", "orig_pf_personal_nc",
+               "orig_pf_card", "orig_pj_total", "orig_pj_working_cap")
+existing_orig <- intersect(orig_vars, names(df_feat))
+
+if (length(existing_orig) > 0) {
+  for (v in existing_orig) {
+    ln_name <- paste0("ln_", v)
+    gyoy_name <- paste0("g_yoy_", v)
+    df_feat <- df_feat %>%
+      mutate(
+        !!ln_name := safe_log(.data[[v]]),
+        !!gyoy_name := 100 * (.data[[ln_name]] - lag(.data[[ln_name]], 12))
+      )
+  }
+  cat("Origination growth variables created for:", paste(existing_orig, collapse = ", "), "\n")
+  cat("Obs with YoY origination growth (total):",
+      sum(!is.na(df_feat[["g_yoy_orig_total"]])), "\n")
+} else {
+  cat("No origination variables available.\n")
+}
+
+# SME credit YoY growth
+if ("credit_mpme" %in% names(df_feat)) {
+  df_feat <- df_feat %>%
+    mutate(
+      ln_credit_mpme = safe_log(credit_mpme),
+      g_yoy_credit_mpme = 100 * (ln_credit_mpme - lag(ln_credit_mpme, 12))
+    )
+  cat("SME credit growth variable created. Obs:",
+      sum(!is.na(df_feat$g_yoy_credit_mpme)), "\n")
+} else {
+  cat("No SME credit variable available.\n")
+}
+
+# Interest rate YoY changes (pp)
+rate_vars <- c("rate_pf_total", "rate_pf_personal_nc", "rate_pj_small")
+existing_rates <- intersect(rate_vars, names(df_feat))
+
+if (length(existing_rates) > 0) {
+  for (v in existing_rates) {
+    d_name <- paste0("d_", v, "_yoy")
+    df_feat <- df_feat %>%
+      mutate(!!d_name := .data[[v]] - lag(.data[[v]], 12))
+  }
+  cat("Interest rate change variables created for:", paste(existing_rates, collapse = ", "), "\n")
+} else {
+  cat("No interest rate variables available.\n")
+}
+
+# OF API call treatment variables
+if ("api_credit" %in% names(df_feat)) {
+  df_feat <- df_feat %>%
+    mutate(
+      ln_api_total  = safe_log(api_total),
+      ln_api_credit = safe_log(api_credit),
+      ln_api_emprestimos = safe_log(api_emprestimos)
+    )
+  cat("OF API treatment variables created.\n")
+  cat("Obs with ln_api_credit:", sum(!is.na(df_feat$ln_api_credit)), "\n")
+} else {
+  cat("No API call data available.\n")
+}
 ```
 
 # Descriptive Analysis
@@ -409,6 +613,29 @@ df_feat %>%
        subtitle = "Millions of customers with active data-sharing consents",
        x = NULL, y = "Customers (millions)") +
   theme_minimal()
+```
+
+## Open Finance API Calls Over Time
+
+```{r plot-api-calls, fig.height=6}
+if ("api_credit" %in% names(df_feat)) {
+  api_plot_data <- df_feat %>%
+    filter(!is.na(api_total)) %>%
+    select(month,
+           `Credit-Related` = api_credit,
+           `Other APIs` = api_total) %>%
+    mutate(`Other APIs` = `Other APIs` - `Credit-Related`) %>%
+    pivot_longer(-month, names_to = "Category", values_to = "calls")
+
+  ggplot(api_plot_data, aes(month, calls / 1e3, fill = Category)) +
+    geom_area(alpha = 0.7) +
+    scale_fill_manual(values = c("Credit-Related" = "steelblue", "Other APIs" = "grey70")) +
+    scale_y_continuous(labels = comma) +
+    labs(title = "Open Finance API Calls by Category",
+         subtitle = "Monthly totals (thousands). Credit = Cartão + Empréstimos + Financiamentos + Dir. Creditórios",
+         x = NULL, y = "API Calls (thousands)") +
+    theme_minimal()
+}
 ```
 
 ## Combined Dashboard
@@ -658,6 +885,277 @@ cat("\nDefault PJ + OF: N =", nrow(df_m_def_pj), ", R² =", round(summary(m_def_
 coeftest(m_def_pj, vcov = nw_def_pj)
 ```
 
+# Part C: Credit Origination Models (Flow-Based)
+
+Credit originations measure the **flow** of new lending, which is more directly relevant to financial inclusion than credit stock. A growing stock could reflect existing loans being maintained, while growing originations indicate new borrowers gaining access.
+
+## Origination Growth ~ Selic + IBC-Br + ln(Customers)
+
+```{r origination-models}
+if ("g_yoy_orig_total" %in% names(df_feat)) {
+  # Total originations
+  df_m_orig <- df_feat %>%
+    select(month, g_yoy_orig_total, selic, g_yoy_ibc_br, ln_cust) %>% drop_na()
+
+  if (nrow(df_m_orig) >= 10) {
+    m_orig_base <- lm(g_yoy_orig_total ~ selic + g_yoy_ibc_br, data = df_m_orig)
+    nw_orig_base <- NeweyWest(m_orig_base, lag = nw_lag(nrow(df_m_orig)), prewhite = FALSE)
+
+    m_orig_ext <- lm(g_yoy_orig_total ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_orig)
+    nw_orig_ext <- NeweyWest(m_orig_ext, lag = nw_lag(nrow(df_m_orig)), prewhite = FALSE)
+
+    cat("Origination Total baseline: N =", nrow(df_m_orig),
+        ", R² =", round(summary(m_orig_base)$r.squared, 4), "\n")
+    coeftest(m_orig_base, vcov = nw_orig_base)
+    cat("\nOrigination Total + OF: N =", nrow(df_m_orig),
+        ", R² =", round(summary(m_orig_ext)$r.squared, 4), "\n")
+    coeftest(m_orig_ext, vcov = nw_orig_ext)
+  } else {
+    cat("Insufficient observations for total origination model (N =", nrow(df_m_orig), ")\n")
+  }
+} else {
+  cat("Origination data not available. Run download_bcb_data.R first.\n")
+}
+```
+
+## PF Personal Loan Originations (Non-Payroll — Highest Information Friction)
+
+```{r origination-pf-personal}
+if ("g_yoy_orig_pf_personal_nc" %in% names(df_feat)) {
+  df_m_orig_nc <- df_feat %>%
+    select(month, g_yoy_orig_pf_personal_nc, selic, g_yoy_ibc_br, ln_cust) %>% drop_na()
+
+  if (nrow(df_m_orig_nc) >= 10) {
+    m_orig_nc <- lm(g_yoy_orig_pf_personal_nc ~ selic + g_yoy_ibc_br + ln_cust,
+                    data = df_m_orig_nc)
+    nw_orig_nc <- NeweyWest(m_orig_nc, lag = nw_lag(nrow(df_m_orig_nc)), prewhite = FALSE)
+
+    cat("PF Personal (non-payroll) Originations + OF: N =", nrow(df_m_orig_nc),
+        ", R² =", round(summary(m_orig_nc)$r.squared, 4), "\n")
+    coeftest(m_orig_nc, vcov = nw_orig_nc)
+  }
+}
+```
+
+## PJ Originations (SME-Relevant)
+
+```{r origination-pj}
+if ("g_yoy_orig_pj_total" %in% names(df_feat)) {
+  df_m_orig_pj <- df_feat %>%
+    select(month, g_yoy_orig_pj_total, selic, g_yoy_ibc_br, ln_cust) %>% drop_na()
+
+  if (nrow(df_m_orig_pj) >= 10) {
+    m_orig_pj <- lm(g_yoy_orig_pj_total ~ selic + g_yoy_ibc_br + ln_cust,
+                    data = df_m_orig_pj)
+    nw_orig_pj <- NeweyWest(m_orig_pj, lag = nw_lag(nrow(df_m_orig_pj)), prewhite = FALSE)
+
+    cat("PJ Originations + OF: N =", nrow(df_m_orig_pj),
+        ", R² =", round(summary(m_orig_pj)$r.squared, 4), "\n")
+    coeftest(m_orig_pj, vcov = nw_orig_pj)
+  }
+}
+
+if ("g_yoy_orig_pj_working_cap" %in% names(df_feat)) {
+  df_m_orig_giro <- df_feat %>%
+    select(month, g_yoy_orig_pj_working_cap, selic, g_yoy_ibc_br, ln_cust) %>% drop_na()
+
+  if (nrow(df_m_orig_giro) >= 10) {
+    m_orig_giro <- lm(g_yoy_orig_pj_working_cap ~ selic + g_yoy_ibc_br + ln_cust,
+                      data = df_m_orig_giro)
+    nw_orig_giro <- NeweyWest(m_orig_giro, lag = nw_lag(nrow(df_m_orig_giro)), prewhite = FALSE)
+
+    cat("\nPJ Working Capital Originations + OF: N =", nrow(df_m_orig_giro),
+        ", R² =", round(summary(m_orig_giro)$r.squared, 4), "\n")
+    coeftest(m_orig_giro, vcov = nw_orig_giro)
+  }
+}
+```
+
+# Part D: SME Credit Models
+
+Tests whether Open Finance adoption is associated with **credit expansion for small and medium enterprises**, a key dimension of financial inclusion.
+
+$$
+g^{yoy}_{Credit_{MPMe},t}
+=
+\beta_0
++
+\beta_1 \, Selic_t
++
+\beta_2 \, g^{yoy}_{IBC\text{-}Br,t}
++
+\beta_3 \, \ln(\text{Customers}_t)
++
+\varepsilon_t
+$$
+
+```{r sme-models}
+if ("g_yoy_credit_mpme" %in% names(df_feat)) {
+  df_m_sme <- df_feat %>%
+    select(month, g_yoy_credit_mpme, selic, g_yoy_ibc_br, ln_cust) %>% drop_na()
+
+  if (nrow(df_m_sme) >= 10) {
+    m_sme_base <- lm(g_yoy_credit_mpme ~ selic + g_yoy_ibc_br, data = df_m_sme)
+    nw_sme_base <- NeweyWest(m_sme_base, lag = nw_lag(nrow(df_m_sme)), prewhite = FALSE)
+
+    m_sme_ext <- lm(g_yoy_credit_mpme ~ selic + g_yoy_ibc_br + ln_cust, data = df_m_sme)
+    nw_sme_ext <- NeweyWest(m_sme_ext, lag = nw_lag(nrow(df_m_sme)), prewhite = FALSE)
+
+    cat("SME Credit baseline: N =", nrow(df_m_sme),
+        ", R² =", round(summary(m_sme_base)$r.squared, 4), "\n")
+    coeftest(m_sme_base, vcov = nw_sme_base)
+    cat("\nSME Credit + OF: N =", nrow(df_m_sme),
+        ", R² =", round(summary(m_sme_ext)$r.squared, 4), "\n")
+    coeftest(m_sme_ext, vcov = nw_sme_ext)
+  } else {
+    cat("Insufficient observations for SME model (N =", nrow(df_m_sme), ")\n")
+  }
+} else {
+  cat("SME credit data not available. Run download_bcb_data.R first.\n")
+}
+```
+
+# Part E: Interest Rate Models (Lending Conditions)
+
+Tests whether Open Finance adoption is associated with **lower borrowing costs**, consistent with the hypothesis that data portability increases competition among lenders:
+
+$$
+\Delta_{12} \, Rate_t
+=
+\beta_0
++
+\beta_1 \, Selic_t
++
+\beta_2 \, g^{yoy}_{IBC\text{-}Br,t}
++
+\beta_3 \, \ln(\text{Customers}_t)
++
+\varepsilon_t
+$$
+
+- $\beta_3 < 0$: Open Finance is associated with declining interest rates (better lending conditions).
+
+```{r rate-models}
+# PF personal non-payroll interest rate (highest information friction segment)
+if ("d_rate_pf_personal_nc_yoy" %in% names(df_feat)) {
+  df_m_rate_nc <- df_feat %>%
+    select(month, d_rate_pf_personal_nc_yoy, selic, g_yoy_ibc_br, ln_cust) %>% drop_na()
+
+  if (nrow(df_m_rate_nc) >= 10) {
+    m_rate_nc_base <- lm(d_rate_pf_personal_nc_yoy ~ selic + g_yoy_ibc_br, data = df_m_rate_nc)
+    nw_rate_nc_base <- NeweyWest(m_rate_nc_base, lag = nw_lag(nrow(df_m_rate_nc)), prewhite = FALSE)
+
+    m_rate_nc <- lm(d_rate_pf_personal_nc_yoy ~ selic + g_yoy_ibc_br + ln_cust,
+                    data = df_m_rate_nc)
+    nw_rate_nc <- NeweyWest(m_rate_nc, lag = nw_lag(nrow(df_m_rate_nc)), prewhite = FALSE)
+
+    cat("PF Personal Rate baseline: N =", nrow(df_m_rate_nc),
+        ", R² =", round(summary(m_rate_nc_base)$r.squared, 4), "\n")
+    coeftest(m_rate_nc_base, vcov = nw_rate_nc_base)
+    cat("\nPF Personal Rate + OF: N =", nrow(df_m_rate_nc),
+        ", R² =", round(summary(m_rate_nc)$r.squared, 4), "\n")
+    coeftest(m_rate_nc, vcov = nw_rate_nc)
+  }
+}
+
+# PJ small business interest rate
+if ("d_rate_pj_small_yoy" %in% names(df_feat)) {
+  df_m_rate_pj <- df_feat %>%
+    select(month, d_rate_pj_small_yoy, selic, g_yoy_ibc_br, ln_cust) %>% drop_na()
+
+  if (nrow(df_m_rate_pj) >= 10) {
+    m_rate_pj <- lm(d_rate_pj_small_yoy ~ selic + g_yoy_ibc_br + ln_cust,
+                    data = df_m_rate_pj)
+    nw_rate_pj <- NeweyWest(m_rate_pj, lag = nw_lag(nrow(df_m_rate_pj)), prewhite = FALSE)
+
+    cat("PJ Small Business Rate + OF: N =", nrow(df_m_rate_pj),
+        ", R² =", round(summary(m_rate_pj)$r.squared, 4), "\n")
+    coeftest(m_rate_pj, vcov = nw_rate_pj)
+  }
+}
+```
+
+# Part F: API Call Volume as Alternative Treatment Variable
+
+The previous models use $\ln(\text{Customers})$ (breadth of OF adoption) as the treatment variable. Here we use $\ln(\text{API Credit Calls})$ — the volume of credit-related API calls (Cartão de Crédito + Empréstimos + Financiamentos + Direitos Creditórios) — which measures the **intensity of OF use** in the credit market specifically.
+
+$$
+Y_t = \beta_0 + \beta_1 \, Selic_t + \beta_2 \, g^{yoy}_{IBC\text{-}Br,t} + \beta_3 \, \ln(\text{API Credit}_t) + \varepsilon_t
+$$
+
+```{r api-credit-models}
+if ("ln_api_credit" %in% names(df_feat)) {
+
+  # Credit stock growth ~ API credit calls
+  df_m_api_cred <- df_feat %>%
+    select(month, g_yoy_credit, selic, g_yoy_ibc_br, ln_api_credit) %>% drop_na()
+
+  if (nrow(df_m_api_cred) >= 10) {
+    m_api_cred <- lm(g_yoy_credit ~ selic + g_yoy_ibc_br + ln_api_credit, data = df_m_api_cred)
+    nw_api_cred <- NeweyWest(m_api_cred, lag = nw_lag(nrow(df_m_api_cred)), prewhite = FALSE)
+    cat("Credit Growth + API Credit: N =", nrow(df_m_api_cred),
+        ", R² =", round(summary(m_api_cred)$r.squared, 4), "\n")
+    coeftest(m_api_cred, vcov = nw_api_cred)
+  }
+
+  # PF Personal loan growth ~ API credit calls
+  df_m_api_pers <- df_feat %>%
+    select(month, g_yoy_pf_personal, selic, g_yoy_ibc_br, ln_api_credit) %>% drop_na()
+
+  if (nrow(df_m_api_pers) >= 10) {
+    m_api_pers <- lm(g_yoy_pf_personal ~ selic + g_yoy_ibc_br + ln_api_credit, data = df_m_api_pers)
+    nw_api_pers <- NeweyWest(m_api_pers, lag = nw_lag(nrow(df_m_api_pers)), prewhite = FALSE)
+    cat("\nPF Personal + API Credit: N =", nrow(df_m_api_pers),
+        ", R² =", round(summary(m_api_pers)$r.squared, 4), "\n")
+    coeftest(m_api_pers, vcov = nw_api_pers)
+  }
+
+  # Default rate ~ API credit calls
+  df_m_api_def <- df_feat %>%
+    select(month, d_default_rate_yoy, selic, g_yoy_ibc_br, ln_api_credit) %>% drop_na()
+
+  if (nrow(df_m_api_def) >= 10) {
+    m_api_def <- lm(d_default_rate_yoy ~ selic + g_yoy_ibc_br + ln_api_credit, data = df_m_api_def)
+    nw_api_def <- NeweyWest(m_api_def, lag = nw_lag(nrow(df_m_api_def)), prewhite = FALSE)
+    cat("\nDefault Rate + API Credit: N =", nrow(df_m_api_def),
+        ", R² =", round(summary(m_api_def)$r.squared, 4), "\n")
+    coeftest(m_api_def, vcov = nw_api_def)
+  }
+
+  # SME credit growth ~ API credit calls
+  if ("g_yoy_credit_mpme" %in% names(df_feat)) {
+    df_m_api_sme <- df_feat %>%
+      select(month, g_yoy_credit_mpme, selic, g_yoy_ibc_br, ln_api_credit) %>% drop_na()
+
+    if (nrow(df_m_api_sme) >= 10) {
+      m_api_sme <- lm(g_yoy_credit_mpme ~ selic + g_yoy_ibc_br + ln_api_credit, data = df_m_api_sme)
+      nw_api_sme <- NeweyWest(m_api_sme, lag = nw_lag(nrow(df_m_api_sme)), prewhite = FALSE)
+      cat("\nSME Credit + API Credit: N =", nrow(df_m_api_sme),
+          ", R² =", round(summary(m_api_sme)$r.squared, 4), "\n")
+      coeftest(m_api_sme, vcov = nw_api_sme)
+    }
+  }
+
+  # Interest rate ~ API credit calls
+  if ("d_rate_pf_personal_nc_yoy" %in% names(df_feat)) {
+    df_m_api_rate <- df_feat %>%
+      select(month, d_rate_pf_personal_nc_yoy, selic, g_yoy_ibc_br, ln_api_credit) %>% drop_na()
+
+    if (nrow(df_m_api_rate) >= 10) {
+      m_api_rate <- lm(d_rate_pf_personal_nc_yoy ~ selic + g_yoy_ibc_br + ln_api_credit,
+                       data = df_m_api_rate)
+      nw_api_rate <- NeweyWest(m_api_rate, lag = nw_lag(nrow(df_m_api_rate)), prewhite = FALSE)
+      cat("\nPF Rate + API Credit: N =", nrow(df_m_api_rate),
+          ", R² =", round(summary(m_api_rate)$r.squared, 4), "\n")
+      coeftest(m_api_rate, vcov = nw_api_rate)
+    }
+  }
+
+} else {
+  cat("API call data not available. Run process_api_data.py first.\n")
+}
+```
+
 # Alternative Specification: Month-over-Month Growth
 
 For robustness, we also estimate credit models using MoM growth rates.
@@ -715,6 +1213,25 @@ models <- list(
   "Credit + OF (MoM)"  = list(m_mom_cred_ext, nw_mom_cred_ext)
 )
 
+# Add new models if they were estimated
+if (exists("m_orig_base"))  models[["Orig Total Base"]]      <- list(m_orig_base, nw_orig_base)
+if (exists("m_orig_ext"))   models[["Orig Total + OF"]]      <- list(m_orig_ext, nw_orig_ext)
+if (exists("m_orig_nc"))    models[["Orig PF Personal + OF"]] <- list(m_orig_nc, nw_orig_nc)
+if (exists("m_orig_pj"))    models[["Orig PJ + OF"]]         <- list(m_orig_pj, nw_orig_pj)
+if (exists("m_orig_giro"))  models[["Orig PJ WkCap + OF"]]   <- list(m_orig_giro, nw_orig_giro)
+if (exists("m_sme_base"))   models[["SME Credit Base"]]      <- list(m_sme_base, nw_sme_base)
+if (exists("m_sme_ext"))    models[["SME Credit + OF"]]      <- list(m_sme_ext, nw_sme_ext)
+if (exists("m_rate_nc_base")) models[["PF Rate Base"]]       <- list(m_rate_nc_base, nw_rate_nc_base)
+if (exists("m_rate_nc"))    models[["PF Rate + OF"]]         <- list(m_rate_nc, nw_rate_nc)
+if (exists("m_rate_pj"))    models[["PJ SmBiz Rate + OF"]]   <- list(m_rate_pj, nw_rate_pj)
+
+# API credit call models
+if (exists("m_api_cred"))  models[["Credit + API Calls"]]    <- list(m_api_cred, nw_api_cred)
+if (exists("m_api_pers"))  models[["PF Personal + API"]]     <- list(m_api_pers, nw_api_pers)
+if (exists("m_api_def"))   models[["Default + API Calls"]]   <- list(m_api_def, nw_api_def)
+if (exists("m_api_sme"))   models[["SME + API Calls"]]       <- list(m_api_sme, nw_api_sme)
+if (exists("m_api_rate"))  models[["PF Rate + API Calls"]]   <- list(m_api_rate, nw_api_rate)
+
 map2_dfr(names(models), models, ~ extract_results(.y[[1]], .y[[2]], .x)) %>%
   mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
   knitr::kable(caption = "Regression Results Summary — Impact of Open Finance on Credit")
@@ -761,6 +1278,40 @@ The modality-level results align with the information asymmetry channel:
 - **Housing**: $\hat{\beta}_3 = -0.66$, $p = 0.001$ — negative but likely driven by the interest rate cycle. Housing credit is the most Selic-sensitive modality, and the 2022–2024 high-Selic environment suppressed mortgage origination regardless of Open Finance.
 - **Payroll loans (consignação)**: Expected to show minimal Open Finance effect since repayment is guaranteed through salary deduction — information asymmetry is already low in this segment.
 
+## Credit Originations (Flow-Based Measures)
+
+Credit originations (concessões) measure the flow of **new lending**, as distinct from the outstanding credit stock. This is the client's priority metric for assessing financial inclusion, as it captures whether new borrowers are gaining access to credit rather than simply whether existing loans are being maintained.
+
+If origination data is available, the key question is whether $\hat{\beta}_3 > 0$ in the origination growth model — i.e., whether Open Finance adoption is associated with faster growth in **new** lending. The personal loan (non-payroll) segment is expected to show the strongest effect, mirroring the stock-based results.
+
+## SME Credit and Open Finance
+
+The SME (MPMe) credit model tests whether micro, small, and medium enterprises benefit from Open Finance. These firms often have thin credit files, making them prime beneficiaries of data portability. If $\hat{\beta}_3 > 0$, Open Finance adoption is associated with faster credit growth for SMEs. Note that the PJ default rate coefficient ($-0.76$, stronger than PF's $-0.19$) already suggests firms benefit disproportionately from Open Finance.
+
+## Lending Conditions (Interest Rates)
+
+The interest rate models test whether Open Finance **reduces the cost of borrowing**. The theoretical mechanism is that data portability increases competition among lenders, compressing interest rate spreads. If $\hat{\beta}_3 < 0$, Open Finance is associated with declining interest rates controlling for monetary policy (Selic) and the business cycle (IBC-Br).
+
+## API Call Volume vs. Customer Count as Treatment Variables
+
+The analysis now uses two alternative measures of Open Finance adoption:
+
+1. **$\ln(\text{Customers})$** — breadth of adoption (how many people share data)
+2. **$\ln(\text{API Credit Calls})$** — intensity of credit-specific data sharing (how much credit data is being queried)
+
+These capture different dimensions. Customer counts grow monotonically with adoption, while API call volumes fluctuate with actual market activity. If both yield similar signs and significance, it strengthens confidence that the association is real. If they diverge, it suggests the mechanism matters: is it the *availability* of data (customers) or the *use* of data (API calls) that drives credit outcomes?
+
+The credit-related API categories — Cartão de Crédito, Empréstimos, Financiamentos, and Direitos Creditórios Descontados — directly measure how much lenders are pulling borrower credit data through Open Finance, making this the most theoretically appropriate treatment variable for credit models.
+
+## Data Gaps — Items Requiring Non-Published Data
+
+Several client-requested analyses cannot be completed with publicly available data:
+
+1. **Borrower segmentation** (low income, rural): Not available in public SCR aggregates. Requires BCB/Open Finance Brazil cooperation.
+2. **Fintech vs. traditional FI breakdown**: SCR aggregates do not segregate by institution type. Fintech-specific lending data would enable a decomposition of consumer credit growth by institution category.
+
+We recommend scheduling the introductory interview with Open Finance Brazil and the Central Bank (as the client offered) to explore the availability of these non-published data sources.
+
 # Caveats and Limitations
 
 1. **Short overlap period**: Open Finance customer data is available from January 2023. SCR data starts from the mid-2010s. The overlap period for models including both credit and customer data is limited.
@@ -802,3 +1353,13 @@ The modality-level results align with the information asymmetry channel:
 | SCR.Data — Inadimplência (Total) | Default rate (%) | `data/inadimplncia.csv` |
 | SCR.Data — Inadimplência (PF/PJ) | Default rate by client type | `data/inadimplencia_pf_pj.csv` |
 | PIX / Macro / Customers | PIX volumes, Selic, IBC-Br, OF customers | `data/data_monthly.xlsx` |
+| BCB SGS 20631 — Concessões Total | Total credit originations (R$) | `data/concessoes_total.csv` |
+| BCB SGS 20672 — Concessões PF Pessoal | PF personal credit originations | `data/concessoes_pf_pessoal_total.csv` |
+| BCB SGS 20666 — Concessões PF Não Consig | PF personal non-payroll originations | `data/concessoes_pf_pessoal_nao_consig.csv` |
+| BCB SGS 20656 — Concessões PF Cartão | PF credit card originations | `data/concessoes_pf_cartao.csv` |
+| BCB SGS 20635 — Concessões PJ Total | PJ total originations | `data/concessoes_pj_total.csv` |
+| BCB SGS 20642 — Concessões PJ Capital Giro | PJ working capital originations | `data/concessoes_pj_capital_giro.csv` |
+| BCB SGS 27701 — Crédito MPMe | SME credit stock (Micro, Small & Medium) | `data/credito_mpme.csv` |
+| BCB SGS 20716 — Taxa Juros PF Total | Avg interest rate - PF total | `data/taxa_juros_pf_total.csv` |
+| BCB SGS 25464 — Taxa Juros PF Pessoal NC | Avg monthly rate - PF personal non-payroll | `data/taxa_juros_pf_pessoal_nao_consig.csv` |
+| BCB SGS 26429 — Taxa Juros PJ Peq Porte | Avg rate - PJ small businesses | `data/taxa_juros_pj_pequeno_porte.csv` |
