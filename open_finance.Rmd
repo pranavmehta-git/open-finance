@@ -330,6 +330,27 @@ if (length(rate_list) > 0) {
 }
 ```
 
+## Open Finance API Calls by Category
+
+```{r load-api-calls}
+# Monthly API call data by category, produced by process_api_data.py
+# from 14 OF Dashboard Excel exports
+api_path <- "data/of_api_monthly.csv"
+
+if (file.exists(api_path)) {
+  of_api <- read_csv(api_path, show_col_types = FALSE) %>%
+    mutate(month = as.Date(month))
+  cat("OF API call data:", nrow(of_api), "months\n")
+  cat("Date range:", as.character(min(of_api$month)),
+      "to", as.character(max(of_api$month)), "\n")
+  cat("Credit-related API calls (latest month):",
+      format(tail(of_api$api_credit, 1), big.mark = ","), "\n")
+} else {
+  of_api <- tibble(month = as.Date(character()))
+  cat("No API call data available. Run process_api_data.py first.\n")
+}
+```
+
 # Merge All Data
 
 ```{r merge-all}
@@ -344,6 +365,7 @@ df_all <- df_merged %>%
 if (nrow(scr_orig) > 0) df_all <- df_all %>% left_join(scr_orig, by = "month")
 if (nrow(sme_credit) > 0) df_all <- df_all %>% left_join(sme_credit, by = "month")
 if (nrow(scr_rates) > 0) df_all <- df_all %>% left_join(scr_rates, by = "month")
+if (nrow(of_api) > 0) df_all <- df_all %>% left_join(of_api, by = "month")
 
 cat("Combined dataset:", nrow(df_all), "months\n")
 cat("Months with credit data:", sum(!is.na(df_all$credit_portfolio)), "\n")
@@ -451,6 +473,20 @@ if (length(existing_rates) > 0) {
   cat("Interest rate change variables created for:", paste(existing_rates, collapse = ", "), "\n")
 } else {
   cat("No interest rate variables available.\n")
+}
+
+# OF API call treatment variables
+if ("api_credit" %in% names(df_feat)) {
+  df_feat <- df_feat %>%
+    mutate(
+      ln_api_total  = safe_log(api_total),
+      ln_api_credit = safe_log(api_credit),
+      ln_api_emprestimos = safe_log(api_emprestimos)
+    )
+  cat("OF API treatment variables created.\n")
+  cat("Obs with ln_api_credit:", sum(!is.na(df_feat$ln_api_credit)), "\n")
+} else {
+  cat("No API call data available.\n")
 }
 ```
 
@@ -577,6 +613,29 @@ df_feat %>%
        subtitle = "Millions of customers with active data-sharing consents",
        x = NULL, y = "Customers (millions)") +
   theme_minimal()
+```
+
+## Open Finance API Calls Over Time
+
+```{r plot-api-calls, fig.height=6}
+if ("api_credit" %in% names(df_feat)) {
+  api_plot_data <- df_feat %>%
+    filter(!is.na(api_total)) %>%
+    select(month,
+           `Credit-Related` = api_credit,
+           `Other APIs` = api_total) %>%
+    mutate(`Other APIs` = `Other APIs` - `Credit-Related`) %>%
+    pivot_longer(-month, names_to = "Category", values_to = "calls")
+
+  ggplot(api_plot_data, aes(month, calls / 1e3, fill = Category)) +
+    geom_area(alpha = 0.7) +
+    scale_fill_manual(values = c("Credit-Related" = "steelblue", "Other APIs" = "grey70")) +
+    scale_y_continuous(labels = comma) +
+    labs(title = "Open Finance API Calls by Category",
+         subtitle = "Monthly totals (thousands). Credit = Cartão + Empréstimos + Financiamentos + Dir. Creditórios",
+         x = NULL, y = "API Calls (thousands)") +
+    theme_minimal()
+}
 ```
 
 ## Combined Dashboard
@@ -1016,6 +1075,87 @@ if ("d_rate_pj_small_yoy" %in% names(df_feat)) {
 }
 ```
 
+# Part F: API Call Volume as Alternative Treatment Variable
+
+The previous models use $\ln(\text{Customers})$ (breadth of OF adoption) as the treatment variable. Here we use $\ln(\text{API Credit Calls})$ — the volume of credit-related API calls (Cartão de Crédito + Empréstimos + Financiamentos + Direitos Creditórios) — which measures the **intensity of OF use** in the credit market specifically.
+
+$$
+Y_t = \beta_0 + \beta_1 \, Selic_t + \beta_2 \, g^{yoy}_{IBC\text{-}Br,t} + \beta_3 \, \ln(\text{API Credit}_t) + \varepsilon_t
+$$
+
+```{r api-credit-models}
+if ("ln_api_credit" %in% names(df_feat)) {
+
+  # Credit stock growth ~ API credit calls
+  df_m_api_cred <- df_feat %>%
+    select(month, g_yoy_credit, selic, g_yoy_ibc_br, ln_api_credit) %>% drop_na()
+
+  if (nrow(df_m_api_cred) >= 10) {
+    m_api_cred <- lm(g_yoy_credit ~ selic + g_yoy_ibc_br + ln_api_credit, data = df_m_api_cred)
+    nw_api_cred <- NeweyWest(m_api_cred, lag = nw_lag(nrow(df_m_api_cred)), prewhite = FALSE)
+    cat("Credit Growth + API Credit: N =", nrow(df_m_api_cred),
+        ", R² =", round(summary(m_api_cred)$r.squared, 4), "\n")
+    coeftest(m_api_cred, vcov = nw_api_cred)
+  }
+
+  # PF Personal loan growth ~ API credit calls
+  df_m_api_pers <- df_feat %>%
+    select(month, g_yoy_pf_personal, selic, g_yoy_ibc_br, ln_api_credit) %>% drop_na()
+
+  if (nrow(df_m_api_pers) >= 10) {
+    m_api_pers <- lm(g_yoy_pf_personal ~ selic + g_yoy_ibc_br + ln_api_credit, data = df_m_api_pers)
+    nw_api_pers <- NeweyWest(m_api_pers, lag = nw_lag(nrow(df_m_api_pers)), prewhite = FALSE)
+    cat("\nPF Personal + API Credit: N =", nrow(df_m_api_pers),
+        ", R² =", round(summary(m_api_pers)$r.squared, 4), "\n")
+    coeftest(m_api_pers, vcov = nw_api_pers)
+  }
+
+  # Default rate ~ API credit calls
+  df_m_api_def <- df_feat %>%
+    select(month, d_default_rate_yoy, selic, g_yoy_ibc_br, ln_api_credit) %>% drop_na()
+
+  if (nrow(df_m_api_def) >= 10) {
+    m_api_def <- lm(d_default_rate_yoy ~ selic + g_yoy_ibc_br + ln_api_credit, data = df_m_api_def)
+    nw_api_def <- NeweyWest(m_api_def, lag = nw_lag(nrow(df_m_api_def)), prewhite = FALSE)
+    cat("\nDefault Rate + API Credit: N =", nrow(df_m_api_def),
+        ", R² =", round(summary(m_api_def)$r.squared, 4), "\n")
+    coeftest(m_api_def, vcov = nw_api_def)
+  }
+
+  # SME credit growth ~ API credit calls
+  if ("g_yoy_credit_mpme" %in% names(df_feat)) {
+    df_m_api_sme <- df_feat %>%
+      select(month, g_yoy_credit_mpme, selic, g_yoy_ibc_br, ln_api_credit) %>% drop_na()
+
+    if (nrow(df_m_api_sme) >= 10) {
+      m_api_sme <- lm(g_yoy_credit_mpme ~ selic + g_yoy_ibc_br + ln_api_credit, data = df_m_api_sme)
+      nw_api_sme <- NeweyWest(m_api_sme, lag = nw_lag(nrow(df_m_api_sme)), prewhite = FALSE)
+      cat("\nSME Credit + API Credit: N =", nrow(df_m_api_sme),
+          ", R² =", round(summary(m_api_sme)$r.squared, 4), "\n")
+      coeftest(m_api_sme, vcov = nw_api_sme)
+    }
+  }
+
+  # Interest rate ~ API credit calls
+  if ("d_rate_pf_personal_nc_yoy" %in% names(df_feat)) {
+    df_m_api_rate <- df_feat %>%
+      select(month, d_rate_pf_personal_nc_yoy, selic, g_yoy_ibc_br, ln_api_credit) %>% drop_na()
+
+    if (nrow(df_m_api_rate) >= 10) {
+      m_api_rate <- lm(d_rate_pf_personal_nc_yoy ~ selic + g_yoy_ibc_br + ln_api_credit,
+                       data = df_m_api_rate)
+      nw_api_rate <- NeweyWest(m_api_rate, lag = nw_lag(nrow(df_m_api_rate)), prewhite = FALSE)
+      cat("\nPF Rate + API Credit: N =", nrow(df_m_api_rate),
+          ", R² =", round(summary(m_api_rate)$r.squared, 4), "\n")
+      coeftest(m_api_rate, vcov = nw_api_rate)
+    }
+  }
+
+} else {
+  cat("API call data not available. Run process_api_data.py first.\n")
+}
+```
+
 # Alternative Specification: Month-over-Month Growth
 
 For robustness, we also estimate credit models using MoM growth rates.
@@ -1085,6 +1225,13 @@ if (exists("m_rate_nc_base")) models[["PF Rate Base"]]       <- list(m_rate_nc_b
 if (exists("m_rate_nc"))    models[["PF Rate + OF"]]         <- list(m_rate_nc, nw_rate_nc)
 if (exists("m_rate_pj"))    models[["PJ SmBiz Rate + OF"]]   <- list(m_rate_pj, nw_rate_pj)
 
+# API credit call models
+if (exists("m_api_cred"))  models[["Credit + API Calls"]]    <- list(m_api_cred, nw_api_cred)
+if (exists("m_api_pers"))  models[["PF Personal + API"]]     <- list(m_api_pers, nw_api_pers)
+if (exists("m_api_def"))   models[["Default + API Calls"]]   <- list(m_api_def, nw_api_def)
+if (exists("m_api_sme"))   models[["SME + API Calls"]]       <- list(m_api_sme, nw_api_sme)
+if (exists("m_api_rate"))  models[["PF Rate + API Calls"]]   <- list(m_api_rate, nw_api_rate)
+
 map2_dfr(names(models), models, ~ extract_results(.y[[1]], .y[[2]], .x)) %>%
   mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
   knitr::kable(caption = "Regression Results Summary — Impact of Open Finance on Credit")
@@ -1145,13 +1292,23 @@ The SME (MPMe) credit model tests whether micro, small, and medium enterprises b
 
 The interest rate models test whether Open Finance **reduces the cost of borrowing**. The theoretical mechanism is that data portability increases competition among lenders, compressing interest rate spreads. If $\hat{\beta}_3 < 0$, Open Finance is associated with declining interest rates controlling for monetary policy (Selic) and the business cycle (IBC-Br).
 
+## API Call Volume vs. Customer Count as Treatment Variables
+
+The analysis now uses two alternative measures of Open Finance adoption:
+
+1. **$\ln(\text{Customers})$** — breadth of adoption (how many people share data)
+2. **$\ln(\text{API Credit Calls})$** — intensity of credit-specific data sharing (how much credit data is being queried)
+
+These capture different dimensions. Customer counts grow monotonically with adoption, while API call volumes fluctuate with actual market activity. If both yield similar signs and significance, it strengthens confidence that the association is real. If they diverge, it suggests the mechanism matters: is it the *availability* of data (customers) or the *use* of data (API calls) that drives credit outcomes?
+
+The credit-related API categories — Cartão de Crédito, Empréstimos, Financiamentos, and Direitos Creditórios Descontados — directly measure how much lenders are pulling borrower credit data through Open Finance, making this the most theoretically appropriate treatment variable for credit models.
+
 ## Data Gaps — Items Requiring Non-Published Data
 
 Several client-requested analyses cannot be completed with publicly available data:
 
 1. **Borrower segmentation** (low income, rural): Not available in public SCR aggregates. Requires BCB/Open Finance Brazil cooperation.
 2. **Fintech vs. traditional FI breakdown**: SCR aggregates do not segregate by institution type. Fintech-specific lending data would enable a decomposition of consumer credit growth by institution category.
-3. **OF API calls by type**: Available from the [Open Finance Dashboard](https://dashboard.openfinancebrasil.org.br/open-data/api-requests/evolution) but requires manual download. The client noted that API call volume by type "signals the direction where OF is heading to" and should be used as a treatment variable.
 
 We recommend scheduling the introductory interview with Open Finance Brazil and the Central Bank (as the client offered) to explore the availability of these non-published data sources.
 
