@@ -83,10 +83,16 @@ scr_pf_pj = cart_pf_pj.merge(inad_pf_pj, on="date")
 scr_pf_pj["month"] = pd.to_datetime(scr_pf_pj["date"] + "-01") + pd.offsets.MonthEnd(0)
 scr_pf_pj = scr_pf_pj.drop(columns="date")
 
-# SCR PF modalities (personal loans = col index 7, i.e. column 8 in 1-indexed)
+# SCR PF modalities — column layout (0-indexed):
+#   5=Cartão de crédito, 6=Empréstimo com consignação (payroll),
+#   7=Empréstimo sem consignação (personal), 8=Habitacional (housing),
+#   11=Veículos (vehicles)
 cart_mod = pd.read_csv("data/carteira_pf_modalities.csv", encoding="utf-8-sig")
-cart_mod = cart_mod.iloc[:, [0, 5, 7]]  # date, card (col6), personal (col8)
-cart_mod.columns = ["date", "credit_pf_card", "credit_pf_personal"]
+cart_mod = cart_mod.iloc[:, [0, 5, 6, 7, 8, 11]]
+cart_mod.columns = [
+    "date", "credit_pf_card", "credit_pf_payroll",
+    "credit_pf_personal", "credit_pf_housing", "credit_pf_vehicles",
+]
 cart_mod["month"] = pd.to_datetime(cart_mod["date"] + "-01") + pd.offsets.MonthEnd(0)
 cart_mod = cart_mod.drop(columns="date")
 
@@ -149,11 +155,15 @@ df["ln_ibc_br"] = np.log(df["ibc_br"])
 df["ln_credit_pf"] = safe_log(df["credit_pf"])
 df["ln_credit_pj"] = safe_log(df["credit_pj"])
 df["ln_pf_personal"] = safe_log(df["credit_pf_personal"])
+df["ln_pf_card"]     = safe_log(df["credit_pf_card"])
+df["ln_pf_housing"]  = safe_log(df["credit_pf_housing"])
 
 df["g_yoy_credit"]      = 100 * (df["ln_credit"] - df["ln_credit"].shift(12))
 df["g_yoy_credit_pf"]   = 100 * (df["ln_credit_pf"] - df["ln_credit_pf"].shift(12))
 df["g_yoy_credit_pj"]   = 100 * (df["ln_credit_pj"] - df["ln_credit_pj"].shift(12))
 df["g_yoy_pf_personal"] = 100 * (df["ln_pf_personal"] - df["ln_pf_personal"].shift(12))
+df["g_yoy_pf_card"]     = 100 * (df["ln_pf_card"] - df["ln_pf_card"].shift(12))
+df["g_yoy_pf_housing"]  = 100 * (df["ln_pf_housing"] - df["ln_pf_housing"].shift(12))
 df["g_yoy_ibc_br"]      = 100 * (df["ln_ibc_br"] - df["ln_ibc_br"].shift(12))
 
 df["d_default_yoy"]    = df["default_rate"] - df["default_rate"].shift(12)
@@ -207,10 +217,12 @@ def run_ols_nw(y_col, x_cols, data):
 controls = ["selic", "g_yoy_ibc_br"]
 
 credit_models = {
-    "Total Credit":     ("g_yoy_credit",      controls + ["ln_cust"]),
-    "PF (Individuals)": ("g_yoy_credit_pf",   controls + ["ln_cust"]),
-    "PJ (Firms)":       ("g_yoy_credit_pj",   controls + ["ln_cust"]),
+    "Total Credit":       ("g_yoy_credit",      controls + ["ln_cust"]),
+    "PF (Individuals)":   ("g_yoy_credit_pf",   controls + ["ln_cust"]),
+    "PJ (Firms)":         ("g_yoy_credit_pj",   controls + ["ln_cust"]),
     "PF Personal\nLoans": ("g_yoy_pf_personal", controls + ["ln_cust"]),
+    "PF Credit\nCard":    ("g_yoy_pf_card",     controls + ["ln_cust"]),
+    "PF Housing":         ("g_yoy_pf_housing",  controls + ["ln_cust"]),
 }
 
 default_models = {
@@ -316,10 +328,104 @@ print("Saved slide1_default_rate.png")
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# SLIDE 1C — Credit Portfolio by Client Type (PF vs PJ)
+# ══════════════════════════════════════════════════════════════════════════
+
+fig, ax = plt.subplots(figsize=(11, 5.5))
+
+mask_pfpj = df["credit_pf"].notna() & df["credit_pj"].notna()
+ax.plot(df.loc[mask_pfpj, "month"], df.loc[mask_pfpj, "credit_pf"] / 1e9,
+        color=BLUE, linewidth=2, label="Individuals (PF)")
+ax.plot(df.loc[mask_pfpj, "month"], df.loc[mask_pfpj, "credit_pj"] / 1e9,
+        color=ORANGE, linewidth=2, label="Firms (PJ)")
+
+ax.axvspan(of_start, df["month"].max(), alpha=0.07, color=GREEN)
+ax.axvline(of_start, color=GREEN, linewidth=0.8, linestyle=":", alpha=0.6)
+ax.text(of_start + pd.Timedelta(days=60), ax.get_ylim()[1] * 0.97,
+        "Open Finance\ndata available", fontsize=9, color=GREEN,
+        va="top", fontstyle="italic")
+
+ax.set_title("Active Credit Portfolio by Client Type", pad=12)
+ax.set_ylabel("Credit Portfolio (R$ Bn)")
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f"{x:,.0f}"))
+ax.xaxis.set_major_locator(mdates.YearLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+ax.legend(loc="upper left", framealpha=0.9)
+
+fig.tight_layout()
+fig.savefig(OUT / "slide1c_credit_pf_pj.png", dpi=200, bbox_inches="tight")
+plt.close(fig)
+print("Saved slide1c_credit_pf_pj.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# SLIDE 1D — PF Credit Portfolio by Modality
+# ══════════════════════════════════════════════════════════════════════════
+
+fig, ax = plt.subplots(figsize=(11, 5.5))
+
+modality_cols = [
+    ("credit_pf_card",     "Credit Card",    PURPLE),
+    ("credit_pf_payroll",  "Payroll",        GREEN),
+    ("credit_pf_personal", "Personal",       RED),
+    ("credit_pf_housing",  "Housing",        BLUE),
+    ("credit_pf_vehicles", "Vehicles",       ORANGE),
+]
+for col, label, color in modality_cols:
+    if col in df.columns:
+        mask_m = df[col].notna()
+        ax.plot(df.loc[mask_m, "month"], df.loc[mask_m, col] / 1e9,
+                color=color, linewidth=1.8, label=label)
+
+ax.axvspan(of_start, df["month"].max(), alpha=0.07, color=GREEN)
+ax.axvline(of_start, color=GREEN, linewidth=0.8, linestyle=":", alpha=0.6)
+
+ax.set_title("PF Credit Portfolio by Modality", pad=12)
+ax.set_ylabel("Credit Portfolio (R$ Bn)")
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f"{x:,.0f}"))
+ax.xaxis.set_major_locator(mdates.YearLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+ax.legend(loc="upper left", framealpha=0.9, ncol=2)
+
+fig.tight_layout()
+fig.savefig(OUT / "slide1d_pf_modalities.png", dpi=200, bbox_inches="tight")
+plt.close(fig)
+print("Saved slide1d_pf_modalities.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# SLIDE 1E — Default Rate by Client Type (PF vs PJ)
+# ══════════════════════════════════════════════════════════════════════════
+
+fig, ax = plt.subplots(figsize=(11, 4.5))
+
+mask_dpfpj = df["default_rate_pf"].notna() & df["default_rate_pj"].notna()
+ax.plot(df.loc[mask_dpfpj, "month"], df.loc[mask_dpfpj, "default_rate_pf"],
+        color=BLUE, linewidth=2, label="Individuals (PF)")
+ax.plot(df.loc[mask_dpfpj, "month"], df.loc[mask_dpfpj, "default_rate_pj"],
+        color=ORANGE, linewidth=2, label="Firms (PJ)")
+
+ax.axvspan(of_start, df["month"].max(), alpha=0.07, color=GREEN)
+ax.axvline(of_start, color=GREEN, linewidth=0.8, linestyle=":", alpha=0.6)
+
+ax.set_title("Default Rate by Client Type", pad=12)
+ax.set_ylabel("Default Rate (%)")
+ax.xaxis.set_major_locator(mdates.YearLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+ax.legend(loc="upper left", framealpha=0.9)
+
+fig.tight_layout()
+fig.savefig(OUT / "slide1e_default_pf_pj.png", dpi=200, bbox_inches="tight")
+plt.close(fig)
+print("Saved slide1e_default_pf_pj.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # SLIDE 2 — Coefficient Plot: Credit Growth
 # ══════════════════════════════════════════════════════════════════════════
 
-def coef_plot(results, title, xlabel, filename, positive_good=True):
+def coef_plot(results, title, xlabel, filename, positive_good=True,
+              row_height=1.5, positive_good_per_row=None):
     labels = list(results.keys())
     betas  = [results[k]["beta"] for k in labels]
     ses    = [results[k]["se"]   for k in labels]
@@ -327,14 +433,19 @@ def coef_plot(results, title, xlabel, filename, positive_good=True):
     ns     = [results[k]["n"]    for k in labels]
     r2s    = [results[k]["r2"]   for k in labels]
 
-    fig, ax = plt.subplots(figsize=(10, max(4.5, len(labels) * 1.5)))
+    fig, ax = plt.subplots(figsize=(10, max(4.5, len(labels) * row_height)))
     y_pos = np.arange(len(labels))
 
+    # Per-row "good sign" override so the summary plot can mix semantics
+    # (growth models: positive is good; default/rate models: negative is good).
+    if positive_good_per_row is None:
+        positive_good_per_row = [positive_good] * len(labels)
+
     colors = []
-    for b, p in zip(betas, pvals):
+    for b, p, pg in zip(betas, pvals, positive_good_per_row):
         if p > 0.10:
             colors.append(GREY)
-        elif (positive_good and b > 0) or (not positive_good and b < 0):
+        elif (pg and b > 0) or (not pg and b < 0):
             colors.append(BLUE)
         else:
             colors.append(ORANGE)
@@ -557,6 +668,69 @@ if "ln_api_credit" in df.columns:
     else:
         print("Skipped slide 7 (insufficient API data for regressions)")
 
-n_slides = (4 + (1 if orig_models else 0) + (1 if inclusion_models else 0)
-            + (1 if has_api_slide else 0) + (1 if has_api_coef_slide else 0))
+
+# ══════════════════════════════════════════════════════════════════════════
+# SLIDE 8 — Master Summary: every β₃ on ln(Customers) across all outcomes
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Merges credit_results + default_results + orig_models + inclusion_models
+# into one forest plot that mirrors §7 "Summary of Key Results" (Table 14)
+# in open_finance_report.docx. Each row is color-coded by whether its
+# observed sign agrees with the expected "good" sign for that outcome
+# (positive for growth/origination outcomes, negative for default/rate
+# outcomes).
+
+master_results = {}
+master_positive_good = []  # per-row: is a positive coefficient "good"?
+
+# Credit growth outcomes — positive is good
+for label, res in credit_results.items():
+    # Flatten any newlines in the original labels
+    clean_label = label.replace("\n", " ")
+    master_results[f"Credit: {clean_label}"] = res
+    master_positive_good.append(True)
+
+# Default rate outcomes — negative is good
+for label, res in default_results.items():
+    master_results[f"Default: {label}"] = res
+    master_positive_good.append(False)
+
+# Origination outcomes (conditional) — positive is good
+for label, res in orig_models.items():
+    clean_label = label.replace("\n", " ")
+    master_results[f"Origination: {clean_label}"] = res
+    master_positive_good.append(True)
+
+# SME + interest rate outcomes (conditional) — positive is good for SME,
+# negative is good for interest rates. Detect from the label text.
+for label, res in inclusion_models.items():
+    clean_label = label.replace("\n", " ")
+    if "Rate" in clean_label:
+        master_results[f"Rate: {clean_label}"] = res
+        master_positive_good.append(False)
+    else:
+        master_results[f"SME: {clean_label}"] = res
+        master_positive_good.append(True)
+
+if len(master_results) >= 2:
+    coef_plot(
+        master_results,
+        title="Summary — Effect of Open Finance on All Credit Outcomes",
+        xlabel="Coefficient on ln(Customers)",
+        filename="slide8_master_summary.png",
+        row_height=0.55,
+        positive_good_per_row=master_positive_good,
+    )
+    has_master_slide = True
+else:
+    has_master_slide = False
+    print("Skipped slide 8 (not enough models for master summary)")
+
+
+n_slides = (4 + 3  # slides 1a, 1b, 2, 3 + 1c, 1d, 1e
+            + (1 if orig_models else 0)
+            + (1 if inclusion_models else 0)
+            + (1 if has_api_slide else 0)
+            + (1 if has_api_coef_slide else 0)
+            + (1 if has_master_slide else 0))
 print(f"\nAll {n_slides} graphs saved to slides/")
