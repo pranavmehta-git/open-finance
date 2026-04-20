@@ -1312,6 +1312,98 @@ Several client-requested analyses cannot be completed with publicly available da
 
 We recommend scheduling the introductory interview with Open Finance Brazil and the Central Bank (as the client offered) to explore the availability of these non-published data sources.
 
+# Policy Recommendations
+
+The empirical results — faster credit growth and markedly lower default rates in segments where information asymmetry is highest, with PJ (firm) default effects roughly four times stronger than PF — point to a set of concrete, evidence-aligned policy priorities. Each recommendation below is tied to a specific finding from the regression framework.
+
+## 1. Prioritize Unsecured Consumer Credit as the Flagship Use Case
+
+**Finding.** PF personal loans (*sem consignação*) show the largest credit-growth response to Open Finance adoption ($\hat{\beta}_{\ln(Cust)} = 7.64$, $p = 0.003$), far above aggregate credit. This is the segment where borrower screening depends most on portable financial history.
+
+**Recommendation.** BCB and the Open Finance governance structure should treat unsecured personal lending as the flagship inclusion channel:
+
+- Tighten SLAs and data-quality standards for the *Empréstimos* and *Cartão de Crédito* API families, which drive the observed effect in the API-intensity models (Part F).
+- Publish segment-specific adoption dashboards (consent counts, successful data pulls, decline rates) so lenders and regulators can monitor whether growth is reaching new borrowers rather than churning existing ones.
+- Fast-track the loan-portability (*portabilidade de crédito*) rails that sit on top of Open Finance, since compressed spreads require borrowers to be able to *act* on outside offers, not just generate them.
+
+## 2. Build an SME / MEI Data-Sharing Track
+
+**Finding.** The PJ default-rate coefficient ($-0.765$) is roughly 4$\times$ the PF coefficient ($-0.185$). Micro-enterprises and MEIs with thin credit files appear to benefit disproportionately from data portability.
+
+**Recommendation.**
+
+- Create a dedicated SME / MEI data-sharing roadmap that includes invoicing, tax (e.g., SPED, Nota Fiscal Eletrônica), and cash-flow data — categories not yet fully standardized in Open Finance.
+- Coordinate with Receita Federal and state tax authorities so that consented tax and invoicing data can flow through the same APIs used for bank data.
+- Pair this with an SME credit-origination tracker (the Part C flow-based measure) so the effect on *new* SME lending — not just stock — can be evaluated directly.
+
+## 3. Shift Emphasis from Breadth (Customers) to Intensity (API Calls)
+
+**Finding.** Two treatment variables produce broadly consistent signs but measure different things: customer consents (breadth) and credit-API call volume (intensity). API calls are the more theoretically appropriate treatment for credit outcomes because they capture actual data use by lenders.
+
+**Recommendation.**
+
+- Set supervisory KPIs on API call volume, success rates, and breadth of categories queried per consent — not only on the number of consents issued.
+- Penalize "vanity consent" patterns where institutions collect consents but rarely pull data, and reward institutions whose call volumes translate into credit decisions.
+- Publish the API-intensity series (Cartão, Empréstimos, Financiamentos, Direitos Creditórios) as an official indicator alongside customer counts.
+
+## 4. Close the Critical Data Gaps for Inclusion Measurement
+
+**Finding.** National aggregates cannot answer whether low-income, rural, thin-file, or fintech-served borrowers are the ones gaining access. The notebook flags this as an unresolved data gap.
+
+**Recommendation.**
+
+- Direct BCB and Open Finance Brazil to publish segmented SCR aggregates by: (i) borrower income band, (ii) municipality size / rurality, (iii) institution type (incumbent bank vs. digital bank vs. fintech / SCD / SEP), and (iv) first-time-borrower flags.
+- Without these segmentations, headline effects may mask concentration of gains in already-served segments. The caveats section is explicit that national-level data masks the heterogeneity that inclusion policy actually cares about.
+
+## 5. Interpret the Housing Result as a Rate-Cycle Warning, Not a Failure
+
+**Finding.** PF housing credit shows a *negative* Open Finance coefficient ($-0.66$), which the interpretation attributes to high Selic sensitivity ($\hat{\beta}_{Selic} = 0.37$, $p < 0.001$) rather than a genuine OF drag.
+
+**Recommendation.**
+
+- Do not use the aggregate housing result as evidence that Open Finance is ineffective for secured lending. Instead, add OF-native mortgage-refinancing flows (portability with pre-approval via shared data) as a specific use case, and re-evaluate after a full Selic easing cycle.
+- Commission a dedicated long-duration-credit study that controls for rate-cycle timing before drawing housing-specific policy conclusions.
+
+## 6. Expand the Evaluation Framework Beyond Time-Series OLS
+
+**Finding.** The caveats section is explicit: customer counts are monotonic, the overlap window is short, and Open Finance adoption, credit, and macro conditions are jointly determined. Significant coefficients may partly capture a trend.
+
+**Recommendation.**
+
+- Mandate a structured evaluation program: (i) difference-in-differences using institution-level or modality-level rollout timing, (ii) instrumental variables using technical API-enablement dates, and (iii) synthetic-control comparisons against Latin American peers without equivalent Open Finance regimes.
+- Require BCB's financial-stability and research departments to publish annual causal-inference updates using SCR microdata, which can identify borrower-level first-access effects not visible in national aggregates.
+
+## 7. Pair Open Finance with Over-Indebtedness Safeguards
+
+**Finding.** The strongest growth effect is in unsecured personal loans — precisely the segment with the highest default risk historically, even if default rates are falling on average.
+
+**Recommendation.**
+
+- Strengthen the *Cadastro Positivo* and indebtedness-ratio (*comprometimento de renda*) monitoring using the same Open Finance data pipes, so lenders are obligated to use the richer data for affordability checks, not only marketing.
+- Tie growth in unsecured OF-originated credit to reporting requirements on renegotiation, *superendividamento* resolution, and complaint volumes.
+
+## 8. Extend Data Portability Beyond Banking
+
+**Finding.** The default-rate improvements are large ($R^2$ rises from 0.62 to 0.96 when $\ln(\text{Customers})$ is added) but plateau will come once the easily-portable bank data has been fully exploited.
+
+**Recommendation.**
+
+- Accelerate integration with Open Insurance (SUSEP) and, where feasible, pension and payroll data, to sustain the information gains as the marginal value of additional bank data declines.
+- A cross-sector portability layer is the logical continuation of the Open Finance agenda and is necessary to keep widening the borrower base beyond those already in the banking system.
+
+## 9. Institutionalize the Open Finance–Credit Evaluation
+
+**Finding.** This notebook had to assemble SCR, SGS, PIX, customer, and API-call data from disparate sources, with several series requiring manual download and processing (`download_bcb_data.R`, `process_api_data.py`).
+
+**Recommendation.**
+
+- BCB should publish a single curated monthly dataset that combines Open Finance adoption metrics with credit aggregates, default rates, originations, and average rates — versioned and revision-tracked — so external researchers can reproduce and extend this type of analysis without bespoke ETL.
+- This is a low-cost, high-leverage step that would enable continuous external scrutiny of Open Finance's inclusion impact.
+
+## Summary
+
+Taken together, the findings support continuing and deepening Brazil's Open Finance program, with the sharpest policy focus on (i) unsecured consumer credit, (ii) SME / MEI inclusion, and (iii) measurement infrastructure that can disaggregate inclusion outcomes and support causal evaluation. The default-rate evidence, in particular, suggests that the information-sharing channel is doing real work — but making that work visible to low-income, rural, and thin-file borrowers requires data the public release does not yet contain.
+
 # Caveats and Limitations
 
 1. **Short overlap period**: Open Finance customer data is available from January 2023. SCR data starts from the mid-2010s. The overlap period for models including both credit and customer data is limited.
